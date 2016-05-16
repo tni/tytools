@@ -95,6 +95,47 @@ if(QT5_TYPE STREQUAL "STATIC_LIBRARY")
             ${Qt5PlatformSupport_LIBRARIES} ${qtpcre_LIBRARIES}
             ${COCOA_LIBRARIES} ${CARBON_LIBRARIES} ${SECURITY_LIBRARIES}
             ${ZLIB_LIBRARIES} ${CUPS_LIBRARIES} ${SC_LIBRARIES})
+    elseif(LINUX)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(X11 REQUIRED x11 xcb x11-xcb xrender xi xfixes xext xkbcommon)
+        pkg_check_modules(GLIB REQUIRED glib-2.0 gthread-2.0 gobject-2.0)
+        pkg_check_modules(FONTCONFIG REQUIRED fontconfig)
+        pkg_check_modules(FREETYPE REQUIRED freetype2)
+        pkg_check_modules(ICE REQUIRED ice)
+        pkg_check_modules(SM REQUIRED sm)
+        pkg_check_modules(DBUS REQUIRED dbus-1)
+
+        find_package(JPEG REQUIRED)
+        find_package(ZLIB REQUIRED)
+
+        find_package(Qt5 REQUIRED COMPONENTS DBus
+            HINTS "${CMAKE_SOURCE_DIR}/qt5/${HOST}"
+            NO_CMAKE_FIND_ROOT_PATH)
+        find_library(Qt5PlatformSupport_LIBRARIES Qt5PlatformSupport
+            HINTS ${QT5_LIBRARY_DIRECTORIES}
+            NO_CMAKE_FIND_ROOT_PATH)
+        find_library(qtpcre_LIBRARIES qtpcre
+            HINTS ${QT5_LIBRARY_DIRECTORIES}
+            NO_CMAKE_FIND_ROOT_PATH)
+        find_library(qtxcbqpa_LIBRARIES Qt5XcbQpa
+            HINTS ${QT5_LIBRARY_DIRECTORIES}
+            NO_CMAKE_FIND_ROOT_PATH)
+        find_library(qxcb_LIBRARIES qxcb
+            HINTS ${QT5_LIBRARY_DIRECTORIES}
+            NO_CMAKE_FIND_ROOT_PATH)
+        find_library(xcb_static_LIBRARIES xcb-static
+            HINTS ${QT5_LIBRARY_DIRECTORIES}
+            NO_CMAKE_FIND_ROOT_PATH)
+
+        # Keep it that way, don't try to reorder that ;] It'll probably break soon
+        # enough on its own.
+        target_link_libraries(tyqt
+            Qt5::QXcbIntegrationPlugin Qt5::PrintSupport
+            ${qtxcbqpa_LIBRARIES} ${qxcb_LIBRARIES} ${xcb_static_LIBRARIES}
+            ${Qt5PlatformSupport_LIBRARIES} ${qtpcre_LIBRARIES} Qt5::DBus
+            dl ${DBUS_LIBRARIES} ${X11_LIBRARIES} ${GLIB_LIBRARIES}
+            ${FREETYPE_LIBRARIES} ${FONTCONFIG_LIBRARIES} ${ICE_LIBRARIES} ${SM_LIBRARIES}
+            ${JPEG_LIBRARIES} ${ZLIB_LIBRARIES})
     endif()
 elseif(WIN32 OR APPLE)
     message(WARNING "Cannot package Qt5 shared libraries")

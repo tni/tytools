@@ -23,6 +23,8 @@
         Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
     #elif defined(__APPLE__)
         Q_IMPORT_PLUGIN(QCocoaIntegrationPlugin)
+    #else
+        Q_IMPORT_PLUGIN(QXcbIntegrationPlugin)
     #endif
 #endif
 
