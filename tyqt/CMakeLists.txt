@@ -133,7 +133,7 @@ if(QT5_TYPE STREQUAL "STATIC_LIBRARY")
             Qt5::QXcbIntegrationPlugin Qt5::PrintSupport
             ${qtxcbqpa_LIBRARIES} ${qxcb_LIBRARIES} ${xcb_static_LIBRARIES}
             ${Qt5PlatformSupport_LIBRARIES} ${qtpcre_LIBRARIES} Qt5::DBus
-            dl ${DBUS_LIBRARIES} ${X11_LIBRARIES} ${GLIB_LIBRARIES}
+            dl m ${DBUS_LIBRARIES} ${X11_LIBRARIES} ${GLIB_LIBRARIES}
             ${FREETYPE_LIBRARIES} ${FONTCONFIG_LIBRARIES} ${ICE_LIBRARIES} ${SM_LIBRARIES}
             ${JPEG_LIBRARIES} ${ZLIB_LIBRARIES})
     endif()

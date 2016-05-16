@@ -43,6 +43,7 @@ elseif(CMAKE_COMPILER_IS_GNUCC)
 else()
     string(TOLOWER "${HOST_CPU}-${CMAKE_SYSTEM_NAME}-${CMAKE_C_COMPILER_ID}" HOST)
 endif()
+message("host: ${HOST}")
 
 if(MSVC)
     add_definitions(-D_CRT_NONSTDC_NO_DEPRECATE -D_CRT_SECURE_NO_WARNINGS)

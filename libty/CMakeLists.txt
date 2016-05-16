@@ -34,9 +34,6 @@ if(LINUX)
                            thread_pthread.c
                            timer_linux.c)
 
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(LIBUDEV REQUIRED libudev)
-
     include_directories(${LIBUDEV_INCLUDE_DIRS})
     list(APPEND TY_LINK_LIBRARIES ${LIBUDEV_LIBRARIES})
 elseif(WIN32)

@@ -6,21 +6,39 @@ language: cpp
 
 env:
   global:
-    - INSTALLER=$TRAVIS_OS_NAME
     - CMAKE_BUILD_TYPE=RelWithDebInfo
-    - QT_VERSION=5.5.1
 matrix:
   include:
     - os: linux
       compiler: gcc
       sudo: required
       dist: trusty
+      env:
+        - INSTALLER=linux
+    - os: linux
+      compiler: gcc
+      sudo: required
+      dist: trusty
+      env:
+        - INSTALLER=linux32-static
+        - QT_VERSION=5.6.0
+        - PACKAGE=../contrib/ci/package-linux-appimage.sh
+        - CMAKE_FLAGS="-DCMAKE_TOOLCHAIN_FILE=../contrib/cmake/i686-linux.cmake -DCMAKE_C_COMPILER=gcc-4.9 -DCMAKE_CXX_COMPILER=g++-4.9"
+    - os: linux
+      compiler: gcc
+      sudo: required
+      dist: trusty
+      env:
+        - INSTALLER=linux64-static
+        - QT_VERSION=5.6.0
+        - PACKAGE=../contrib/ci/package-linux-appimage.sh
     - os: linux
       compiler: gcc
       sudo: required
       dist: trusty
       env:
         - INSTALLER=win32
+        - QT_VERSION=5.5.1
         - CMAKE_FLAGS="-DCMAKE_TOOLCHAIN_FILE=../contrib/cmake/i686-w64-mingw32.cmake"
     - os: linux
       compiler: gcc
@@ -28,19 +46,24 @@ matrix:
       dist: trusty
       env:
         - INSTALLER=win64
+        - QT_VERSION=5.5.1
         - CMAKE_FLAGS="-DCMAKE_TOOLCHAIN_FILE=../contrib/cmake/x86_64-w64-mingw32.cmake"
     - os: osx
       compiler: clang
+      env:
+        - INSTALLER=osx
+        - QT_VERSION=5.5.1
+        - PACKAGE=cpack
 
 install:
   - contrib/ci/install-$INSTALLER.sh
 
 before_script:
   - mkdir build && cd build
-  - cmake -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE $CMAKE_FLAGS ..
+  - ../cmake-3.5.2-Linux-x86_64/bin/cmake -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE $CMAKE_FLAGS ..
 script:
   - make
-  - if [[ "$INSTALLER" == "osx" ]]; then cpack; fi
+  - if [[ -n "$PACKAGE" ]]; then $PACKAGE; fi
 
 before_deploy:
   - sed -e "s/__VERSION__/$TRAVIS_BRANCH/" ../contrib/ci/deploy-bintray.json >deploy-bintray.json
