@@ -180,4 +180,16 @@ elseif(APPLE)
     install(FILES LICENSE.txt DESTINATION .)
 
     include(CPack)
+elseif(LINUX)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(CPACK_PACKAGE_FILE_NAME "TyQt-${TY_VERSION}-linux64")
+    else()
+        set(CPACK_PACKAGE_FILE_NAME "TyQt-${TY_VERSION}-linux32")
+    endif()
+    set(CPACK_GENERATOR TXZ)
+
+    install(FILES README.md DESTINATION . RENAME README.txt)
+    install(FILES LICENSE.txt DESTINATION .)
+
+    include(CPack)
 endif()
