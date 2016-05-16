@@ -30,6 +30,12 @@ HOST=${@:$OPTIND+1:1}
 [ -z "$HOST" ] && (echo "Missing host parameter" >&2; print_usage >&2; exit 1)
 
 case "$HOST" in
+    i686-linux-gcc)
+        NATIVE_FLAGS="-platform linux-g++-32 -qt-xcb -qt-harfbuzz -qt-libpng -qt-xkbcommon-x11 -pulseaudio -glib -gtkstyle"
+        ;;
+    x86_64-linux-gcc)
+        NATIVE_FLAGS="-platform linux-g++-64 -qt-xcb -qt-harfbuzz -qt-libpng -qt-xkbcommon-x11 -pulseaudio -glib -gtkstyle"
+        ;;
     i686-w64-mingw32)
         NATIVE_FLAGS="-platform win32-g++ -qt-zlib -qt-freetype"
         CROSS_FLAGS="-xplatform win32-g++ -device-option CROSS_COMPILE=i686-w64-mingw32- -no-pkg-config -qt-zlib -qt-freetype"
