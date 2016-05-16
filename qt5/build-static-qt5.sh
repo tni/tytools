@@ -1,4 +1,4 @@
-#!/bin/sh -e
+#!/bin/bash -e
 
 print_usage() {
     printf "usage: %s [options] <version> (e.g. 5.5.1) <host>\n\n" "$(basename $0)"
