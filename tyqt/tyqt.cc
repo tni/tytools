@@ -107,8 +107,16 @@ TyQt::~TyQt()
 
 QString TyQt::clientFilePath()
 {
-#ifdef _WIN32
+#if defined(_WIN32)
     return applicationDirPath() + "/tyqtc.exe";
+#elif defined(__linux__)
+    static QString path;
+    if (path.isEmpty()) {
+        path = getenv("APPIMAGE");
+        if (path.isEmpty())
+            path = applicationFilePath();
+    }
+    return path;
 #else
     return applicationFilePath();
 #endif
