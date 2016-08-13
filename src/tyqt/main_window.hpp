@@ -134,6 +134,7 @@ private slots:
     void setClearOnResetForSelection(bool clear_on_reset);
     void setScrollBackLimitForSelection(int limit);
     void setEnableSerialForSelection(bool enable);
+    void setSerialLogSizeForSelection(int size);
 };
 
 #endif
