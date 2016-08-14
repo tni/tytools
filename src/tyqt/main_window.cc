@@ -182,6 +182,12 @@ MainWindow::MainWindow(QWidget *parent)
         if (monitor_->rowCount() == 1)
             boardList->setCurrentIndex(monitor_->index(0, 0));
     });
+    /* serialEdit->setFocus() is not called in selectionChanged() if the board list
+       has the focus to prevent stealing keyboard focus. We need to do it here. */
+    connect(boardList, &QListView::clicked, this, [=]() {
+        if (tabWidget->currentWidget() == serialTab && serialEdit->isEnabled())
+            serialEdit->setFocus();
+    });
     // The blue selection frame displayed on OSX looks awful
     boardList->setAttribute(Qt::WA_MacShowFocusRect, false);
     connect(actionRenameBoard, &QAction::triggered, this, [=]() {
@@ -193,6 +199,7 @@ MainWindow::MainWindow(QWidget *parent)
     setTabOrder(boardList, boardComboBox);
     boardComboBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     boardComboBox->setMinimumContentsLength(12);
+    boardComboBox->setFocusPolicy(Qt::TabFocus);
     boardComboBox->setModel(monitor_);
     boardComboBox->setVisible(false);
     auto spacer = new QWidget();
@@ -876,7 +883,9 @@ void MainWindow::selectionChanged(const QItemSelection &newsel, const QItemSelec
         refreshInterfaces();
         refreshStatus();
 
-        /* Focus the serial input widget if we can, but don't be a jerk to the user. */
+        /* Focus the serial input widget if we can, but don't be a jerk. Unfortunately
+           this also prevents proper edit focus when the user clicks a board in the
+           list, we fix that by handling boardList::clicked() in the constructor. */
         if (tabWidget->currentWidget() == serialTab && serialEdit->isEnabled() &&
                 !boardList->hasFocus() && !boardComboBox->hasFocus())
             serialEdit->setFocus();
