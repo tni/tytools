@@ -13,6 +13,7 @@ init:
   - cmake -E remove c:\programdata\chocolatey\bin\cpack.exe
 
 environment:
+  CONFIG_VARIANT: "morningstar"
   BUILD_TYPE: "RelWithDebInfo"
 
   matrix:
@@ -26,7 +27,7 @@ install:
   - 7z x "%QT_PACKAGE%" >NUL
 
 before_build:
-  - cmake %CMAKE_FLAGS% .
+  - cmake -DTY_CONFIG_VARIANT=%CONFIG_VARIANT% %CMAKE_FLAGS% .
 build_script:
   - cmake --build . --config "%BUILD_TYPE%" -- /logger:"C:\Program Files\AppVeyor\BuildAgent\Appveyor.MSBuildLogger.dll"
 after_build:
