@@ -29,6 +29,7 @@
 #include <dbt.h>
 #include <devioctl.h>
 #include <hidsdi.h>
+#include <hidpi.h>
 #include <initguid.h>
 #include <process.h>
 #include <setupapi.h>
@@ -49,9 +50,10 @@ struct hs_monitor {
     HANDLE thread;
     HANDLE thread_hwnd;
 
-    HANDLE notifications_event;
+    HANDLE thread_event;
     CRITICAL_SECTION notifications_lock;
     _hs_list_head notifications;
+    _hs_list_head pending_notifications;
     int thread_ret;
 };
 
@@ -74,6 +76,9 @@ struct notification {
 #if defined(__MINGW64_VERSION_MAJOR) && __MINGW64_VERSION_MAJOR < 4
 __declspec(dllimport) BOOLEAN NTAPI HidD_GetSerialNumberString(HANDLE HidDeviceObject,
                                                                PVOID Buffer, ULONG BufferLength);
+__declspec(dllimport) BOOLEAN NTAPI HidD_GetPreparsedData(HANDLE HidDeviceObject,
+                                                          PHIDP_PREPARSED_DATA *PreparsedData);
+__declspec(dllimport) BOOLEAN NTAPI HidD_FreePreparsedData(PHIDP_PREPARSED_DATA PreparsedData);
 #endif
 
 extern const struct _hs_device_vtable _hs_win32_device_vtable;
@@ -86,26 +91,10 @@ static const struct setup_class setup_classes[] = {
     {"HIDClass", HS_DEVICE_TYPE_HID}
 };
 
-static GUID hid_guid;
-
+static volatile LONG controllers_lock_setup;
 static CRITICAL_SECTION controllers_lock;
 static char *controllers[32];
 static unsigned int controllers_count;
-
-_HS_INIT()
-{
-    HidD_GetHidGuid(&hid_guid);
-    InitializeCriticalSection(&controllers_lock);
-}
-
-_HS_EXIT()
-{
-    UnregisterClass(MONITOR_CLASS_NAME, GetModuleHandle(NULL));
-
-    for (unsigned int i = 0; i < controllers_count; i++)
-        free(controllers[i]);
-    DeleteCriticalSection(&controllers_lock);
-}
 
 static uint8_t find_controller(const char *id)
 {
@@ -453,8 +442,6 @@ static int resolve_device_location(DEVINST inst, uint8_t ports[])
 static int read_hid_properties(hs_device *dev, const USB_DEVICE_DESCRIPTOR *desc)
 {
     HANDLE h = NULL;
-    wchar_t wbuf[256];
-    BOOL success;
     int r;
 
     h = CreateFile(dev->path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
@@ -466,8 +453,11 @@ static int read_hid_properties(hs_device *dev, const USB_DEVICE_DESCRIPTOR *desc
 
 #define READ_HID_PROPERTY(index, func, dest) \
         if (index) { \
-            success = func(h, wbuf, sizeof(wbuf)); \
-            if (success) { \
+            wchar_t wbuf[256]; \
+            BOOL bret; \
+            \
+            bret = func(h, wbuf, sizeof(wbuf)); \
+            if (bret) { \
                 wbuf[_HS_COUNTOF(wbuf) - 1] = 0; \
                 r = wide_to_cstring(wbuf, wcslen(wbuf) * sizeof(wchar_t), (dest)); \
                 if (r < 0) \
@@ -482,6 +472,29 @@ static int read_hid_properties(hs_device *dev, const USB_DEVICE_DESCRIPTOR *desc
     READ_HID_PROPERTY(desc->iSerialNumber, HidD_GetSerialNumberString, &dev->serial);
 
 #undef READ_HID_PROPERTY
+
+    {
+        // semi-hidden Hungarian pointers? Really , Microsoft?
+        PHIDP_PREPARSED_DATA pp;
+        HIDP_CAPS caps;
+        LONG lret;
+
+        lret = HidD_GetPreparsedData(h, &pp);
+        if (!lret) {
+            hs_log(HS_LOG_WARNING, "HidD_GetPreparsedData() failed on '%s", dev->path);
+            goto ignore_hid_descriptor;
+        }
+        lret = HidP_GetCaps(pp, &caps);
+        HidD_FreePreparsedData(pp);
+        if (lret != HIDP_STATUS_SUCCESS) {
+            hs_log(HS_LOG_WARNING, "Invalid HID descriptor from '%s", dev->path);
+            goto ignore_hid_descriptor;
+        }
+
+        dev->u.hid.usage_page = caps.UsagePage;
+        dev->u.hid.usage = caps.Usage;
+    }
+ignore_hid_descriptor:
 
     r = 1;
 cleanup:
@@ -717,7 +730,11 @@ static int find_device_node(DEVINST inst, hs_device *dev)
 
         dev->type = HS_DEVICE_TYPE_SERIAL;
     } else if (strncmp(dev->key, "HID\\", 4) == 0) {
-        r = build_device_path(dev->key, &hid_guid, &dev->path);
+        static GUID hid_interface_guid;
+        if (!hid_interface_guid.Data1)
+            HidD_GetHidGuid(&hid_interface_guid);
+
+        r = build_device_path(dev->key, &hid_interface_guid, &dev->path);
         if (r < 0)
             return r;
 
@@ -726,6 +743,7 @@ static int find_device_node(DEVINST inst, hs_device *dev)
         hs_log(HS_LOG_DEBUG, "Unknown device type for '%s'", dev->key);
         return 0;
     }
+    dev->vtable = &_hs_win32_device_vtable;
 
     return 1;
 }
@@ -794,8 +812,6 @@ static int process_win32_device(DEVINST inst, const char *id, hs_device **rdev)
     if (r < 0)
         goto cleanup;
 
-    dev->vtable = &_hs_win32_device_vtable;
-
     *rdev = dev;
     dev = NULL;
     r = 1;
@@ -805,11 +821,32 @@ cleanup:
     return r;
 }
 
+static void free_controllers(void)
+{
+    for (unsigned int i = 0; i < controllers_count; i++)
+        free(controllers[i]);
+    DeleteCriticalSection(&controllers_lock);
+}
+
 static int populate_controllers(void)
 {
     HDEVINFO set = NULL;
     SP_DEVINFO_DATA info;
     int r;
+
+    if (controllers_count)
+        return 0;
+
+    if (controllers_lock_setup != 2) {
+        if (!InterlockedCompareExchange(&controllers_lock_setup, 1, 0)) {
+            InitializeCriticalSection(&controllers_lock);
+            atexit(free_controllers);
+            controllers_lock_setup = 2;
+        } else {
+            while (controllers_lock_setup != 2)
+                continue;
+        }
+    }
 
     EnterCriticalSection(&controllers_lock);
 
@@ -938,18 +975,35 @@ int enumerate(_hs_filter *filter, hs_enumerate_func *f, void *udata)
     return 0;
 }
 
+struct enumerate_enumerate_context {
+    hs_enumerate_func *f;
+    void *udata;
+};
+
+static int enumerate_enumerate_callback(hs_device *dev, void *udata)
+{
+    struct enumerate_enumerate_context *ctx = udata;
+
+    _hs_device_log(dev, "Enumerate");
+    return (*ctx->f)(dev, ctx->udata);
+}
+
 int hs_enumerate(const hs_match *matches, unsigned int count, hs_enumerate_func *f, void *udata)
 {
     assert(f);
 
     _hs_filter filter = {0};
+    struct enumerate_enumerate_context ctx;
     int r;
 
     r = _hs_filter_init(&filter, matches, count);
     if (r < 0)
         return r;
 
-    r = enumerate(&filter, f, udata);
+    ctx.f = f;
+    ctx.udata = udata;
+
+    r = enumerate(&filter, enumerate_enumerate_callback, &ctx);
 
     _hs_filter_release(&filter);
     return r;
@@ -960,6 +1014,7 @@ static int post_notification(hs_monitor *monitor, enum notification_type event,
 {
     const char *id, *id_end;
     struct notification *notif;
+    UINT_PTR timer;
 
     if (msg->dbcc_devicetype != DBT_DEVTYP_DEVICEINTERFACE)
         return 0;
@@ -996,10 +1051,11 @@ static int post_notification(hs_monitor *monitor, enum notification_type event,
         }
     }
 
-    EnterCriticalSection(&monitor->notifications_lock);
-    _hs_list_add_tail(&monitor->notifications, &notif->node);
-    SetEvent(monitor->notifications_event);
-    LeaveCriticalSection(&monitor->notifications_lock);
+    _hs_list_add_tail(&monitor->pending_notifications, &notif->node);
+
+    timer = SetTimer(monitor->thread_hwnd, 1, 500, NULL);
+    if (!timer)
+        return hs_error(HS_ERROR_SYSTEM, "SetTimer() failed: %s", hs_win32_strerror(0));
 
     return 0;
 }
@@ -1026,7 +1082,18 @@ static LRESULT __stdcall window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         if (r < 0) {
             EnterCriticalSection(&monitor->notifications_lock);
             monitor->thread_ret = r;
-            SetEvent(monitor->notifications_event);
+            SetEvent(monitor->thread_event);
+            LeaveCriticalSection(&monitor->notifications_lock);
+        }
+        break;
+
+    case WM_TIMER:
+        if (CMP_WaitNoPendingInstallEvents(0) == WAIT_OBJECT_0) {
+            KillTimer(hwnd, 1);
+
+            EnterCriticalSection(&monitor->notifications_lock);
+            _hs_list_splice_tail(&monitor->notifications, &monitor->pending_notifications);
+            SetEvent(monitor->thread_event);
             LeaveCriticalSection(&monitor->notifications_lock);
         }
         break;
@@ -1039,6 +1106,11 @@ static LRESULT __stdcall window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
     return DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
+static void unregister_monitor_class(void)
+{
+    UnregisterClass(MONITOR_CLASS_NAME, GetModuleHandle(NULL));
+}
+
 static unsigned int __stdcall monitor_thread(void *udata)
 {
     _HS_UNUSED(udata);
@@ -1046,10 +1118,10 @@ static unsigned int __stdcall monitor_thread(void *udata)
     hs_monitor *monitor = udata;
 
     WNDCLASSEX cls = {0};
+    ATOM cls_atom;
     DEV_BROADCAST_DEVICEINTERFACE filter = {0};
     HDEVNOTIFY notify_handle = NULL;
     MSG msg;
-    BOOL success;
     int r;
 
     cls.cbSize = sizeof(cls);
@@ -1059,7 +1131,9 @@ static unsigned int __stdcall monitor_thread(void *udata)
 
     /* If this fails, CreateWindow() will fail too so we can ignore errors here. This
        also takes care of any failure that may result from the class already existing. */
-    RegisterClassEx(&cls);
+    cls_atom = RegisterClassEx(&cls);
+    if (cls_atom)
+        atexit(unregister_monitor_class);
 
     monitor->thread_hwnd = CreateWindow(MONITOR_CLASS_NAME, MONITOR_CLASS_NAME, 0, 0, 0, 0, 0,
                                         HWND_MESSAGE, NULL, NULL, NULL);
@@ -1090,14 +1164,11 @@ static unsigned int __stdcall monitor_thread(void *udata)
 
     /* Our fake window is created and ready to receive device notifications,
        hs_monitor_new() can go on. */
-    SetEvent(monitor->notifications_event);
+    SetEvent(monitor->thread_event);
 
-    while ((success = GetMessage(&msg, NULL, 0, 0)) != 0) {
-        if(success < 0) {
-            r = hs_error(HS_ERROR_SYSTEM, "GetMessage() failed: %s", hs_win32_strerror(0));
-            goto cleanup;
-        }
-
+    /* As it turns out, GetMessage() cannot fail if the parameters are correct.
+       https://blogs.msdn.microsoft.com/oldnewthing/20130322-00/?p=4873/ */
+    while (GetMessage(&msg, NULL, 0, 0) != 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
@@ -1110,7 +1181,7 @@ cleanup:
         DestroyWindow(monitor->thread_hwnd);
     if (r < 0) {
         monitor->thread_ret = r;
-        SetEvent(monitor->notifications_event);
+        SetEvent(monitor->thread_event);
     }
     return 0;
 }
@@ -1142,13 +1213,14 @@ int hs_monitor_new(const hs_match *matches, unsigned int count, hs_monitor **rmo
         goto error;
 
     InitializeCriticalSection(&monitor->notifications_lock);
-    monitor->notifications_event = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (!monitor->notifications_event) {
+    monitor->thread_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!monitor->thread_event) {
         r = hs_error(HS_ERROR_SYSTEM, "CreateEvent() failed: %s", hs_win32_strerror(0));
         goto error;
     }
 
     _hs_list_init(&monitor->notifications);
+    _hs_list_init(&monitor->pending_notifications);
 
     *rmonitor = monitor;
     return 0;
@@ -1164,8 +1236,8 @@ void hs_monitor_free(hs_monitor *monitor)
         hs_monitor_stop(monitor);
 
         DeleteCriticalSection(&monitor->notifications_lock);
-        if (monitor->notifications_event)
-            CloseHandle(monitor->notifications_event);
+        if (monitor->thread_event)
+            CloseHandle(monitor->thread_event);
 
         _hs_monitor_release(monitor);
     }
@@ -1176,7 +1248,7 @@ void hs_monitor_free(hs_monitor *monitor)
 hs_descriptor hs_monitor_get_descriptor(const hs_monitor *monitor)
 {
     assert(monitor);
-    return monitor->notifications_event;
+    return monitor->thread_event;
 }
 
 int hs_monitor_start(hs_monitor *monitor)
@@ -1198,12 +1270,12 @@ int hs_monitor_start(hs_monitor *monitor)
         goto error;
     }
 
-    WaitForSingleObject(monitor->notifications_event, INFINITE);
+    WaitForSingleObject(monitor->thread_event, INFINITE);
     if (monitor->thread_ret < 0) {
         r = monitor->thread_ret;
         goto error;
     }
-    ResetEvent(monitor->notifications_event);
+    ResetEvent(monitor->thread_event);
 
     r = enumerate(&monitor->filter, monitor_enumerate_callback, monitor);
     if (r < 0)
@@ -1236,6 +1308,12 @@ void hs_monitor_stop(hs_monitor *monitor)
         struct notification *notif = _hs_container_of(cur, struct notification, node);
         free(notif);
     }
+    _hs_list_foreach(cur, &monitor->pending_notifications) {
+        struct notification *notif = _hs_container_of(cur, struct notification, node);
+        free(notif);
+    }
+    _hs_list_init(&monitor->notifications);
+    _hs_list_init(&monitor->pending_notifications);
 }
 
 static int process_arrival_notification(hs_monitor *monitor, const char *key, hs_enumerate_func *f,
@@ -1315,7 +1393,7 @@ cleanup:
     EnterCriticalSection(&monitor->notifications_lock);
     _hs_list_splice(&monitor->notifications, &notifications);
     if (_hs_list_is_empty(&monitor->notifications))
-        ResetEvent(monitor->notifications_event);
+        ResetEvent(monitor->thread_event);
     LeaveCriticalSection(&monitor->notifications_lock);
     return r;
 }

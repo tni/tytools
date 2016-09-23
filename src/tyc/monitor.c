@@ -5,36 +5,15 @@
  * Copyright (c) 2015 Niels Martignène <niels.martignene@gmail.com>
  */
 
-#include <getopt.h>
 #include <unistd.h>
 #ifdef _WIN32
     #define WIN32_LEAN_AND_MEAN
     #include <windows.h>
 #endif
+#include "hs/device.h"
 #include "hs/serial.h"
 #include "ty/system.h"
 #include "main.h"
-
-enum {
-    MONITOR_OPTION_NORESET = 0x200,
-    MONITOR_OPTION_TIMEOUT_EOF
-};
-
-static const char *short_options = COMMON_SHORT_OPTIONS"b:d:D:f:p:rRs";
-static const struct option long_options[] = {
-    COMMON_LONG_OPTIONS
-    {"baud",        required_argument, NULL, 'b'},
-    {"databits",    required_argument, NULL, 'd'},
-    {"direction",   required_argument, NULL, 'D'},
-    {"flow",        required_argument, NULL, 'f'},
-    {"noreset",     no_argument,       NULL, MONITOR_OPTION_NORESET},
-    {"parity",      required_argument, NULL, 'p'},
-    {"raw",         no_argument,       NULL, 'r'},
-    {"reconnect",   no_argument,       NULL, 'R'},
-    {"silent",      no_argument,       NULL, 's'},
-    {"timeout-eof", required_argument, NULL, MONITOR_OPTION_TIMEOUT_EOF},
-    {0}
-};
 
 enum {
     DIRECTION_INPUT = 1,
@@ -45,8 +24,7 @@ enum {
 #define ERROR_IO_TIMEOUT 5000
 
 static int terminal_flags = 0;
-static uint32_t device_rate = 115200;
-static int device_flags = 0;
+static hs_serial_config serial_config = {0};
 static int directions = DIRECTION_INPUT | DIRECTION_OUTPUT;
 static bool reconnect = false;
 static int timeout_eof = 200;
@@ -72,21 +50,26 @@ static void print_monitor_usage(FILE *f)
     fprintf(f, "\n");
 
     fprintf(f, "Monitor options:\n"
-               "   -b, --baud <rate>        Use baudrate for serial port\n"
-               "   -d, --databits <bits>    Change number of bits for each character\n"
-               "                            Must be one of 5, 6, 7 or 8 (default)\n"
-               "   -D, --direction <dir>    Open serial connection in given direction\n"
-               "                            Supports input, output, both (default)\n"
-               "   -f, --flow <control>     Define flow-control mode\n"
-               "                            Supports xonxoff (x), rtscts (h) and none (n)\n"
-               "   -p, --parity <bits>      Change parity mode to use for the serial port\n"
-               "                            Supports odd (o), even (e) and none (n)\n\n"
                "   -r, --raw                Disable line-buffering and line-editing\n"
                "   -s, --silent             Disable echoing of local input on terminal\n\n"
                "   -R, --reconnect          Try to reconnect on I/O errors\n"
-               "       --noreset            Don't reset serial port when closing\n"
+               "   -D, --direction <dir>    Open serial connection in given direction\n"
+               "                            Supports input, output, both (default)\n"
                "       --timeout-eof <ms>   Time before closing after EOF on standard input\n"
-               "                            Defaults to %d ms, use -1 to disable\n", timeout_eof);
+               "                            Defaults to %d ms, use -1 to disable\n\n", timeout_eof);
+
+    fprintf(f, "Serial settings:\n"
+               "   -b, --baudrate <rate>    Use baudrate for serial port\n"
+               "   -d, --databits <bits>    Change number of bits for every character\n"
+               "                            Must be one of: 5, 6, 7 or 8\n"
+               "   -p, --stopbits <bits>    Change number of stop bits for every character\n"
+               "                            Must be one of: 1 or 2\n"
+               "   -f, --flow <control>     Define flow-control mode\n"
+               "                            Must be one of: off, rtscts or xonxoff\n"
+               "   -y, --parity <bits>      Change parity mode to use for the serial port\n"
+               "                            Must be one of: off, even, or odd\n\n"
+               "These settings are mostly ignored by the USB serial emulation, but you can still\n"
+               "access them in your embedded code (e.g. the Serial object API on Teensy).\n");
 }
 
 static int redirect_stdout(int *routfd)
@@ -198,25 +181,41 @@ static void stop_stdin_thread(void)
 
 #endif
 
+static int open_serial_interface(ty_board *board, ty_board_interface **riface)
+{
+    ty_board_interface *iface;
+    int r;
+
+    r = ty_board_open_interface(board, TY_BOARD_CAPABILITY_SERIAL, &iface);
+    if (r < 0)
+        return r;
+
+    if (hs_device_get_type(ty_board_interface_get_device(iface)) == HS_DEVICE_TYPE_SERIAL) {
+        r = hs_serial_set_config(ty_board_interface_get_handle(iface), &serial_config);
+        if (r < 0)
+            return (int)r;
+    }
+
+    *riface = iface;
+    return 0;
+}
+
 static int fill_descriptor_set(ty_descriptor_set *set, ty_board *board)
 {
+    ty_board_interface *iface;
+    int r;
+
     ty_descriptor_set_clear(set);
 
+    // Board events / state changes
     ty_monitor_get_descriptors(ty_board_get_monitor(board), set, 1);
-    if (directions & DIRECTION_INPUT) {
-        ty_board_interface *iface;
-        int r;
 
-        r = ty_board_open_interface(board, TY_BOARD_CAPABILITY_SERIAL, &iface);
-        if (r < 0)
-            return r;
+    r = open_serial_interface(board, &iface);
+    if (r < 0)
+        return r;
 
+    if (directions & DIRECTION_INPUT)
         ty_board_interface_get_descriptors(iface, set, 2);
-
-        /* ty_board_interface_unref() keeps iface->open_count > 0 so the interface
-           does not get closed, and we can monitor the handle. */
-        ty_board_interface_unref(iface);
-    }
 #ifdef _WIN32
     if (directions & DIRECTION_OUTPUT) {
         if (input_available) {
@@ -230,6 +229,11 @@ static int fill_descriptor_set(ty_descriptor_set *set, ty_board *board)
         ty_descriptor_set_add(set, STDIN_FILENO, 3);
 #endif
 
+    /* ty_board_interface_unref() keeps iface->open_count > 0 so the device file does not
+       get closed, and we can monitor the descriptor. When the refcount reaches 0, the
+       device is closed anyway so we don't leak anything. */
+    ty_board_interface_unref(iface);
+
     return 0;
 }
 
@@ -241,10 +245,6 @@ static int loop(ty_board *board, int outfd)
     ssize_t r;
 
 restart:
-    r = ty_board_serial_set_attributes(board, device_rate, device_flags);
-    if (r < 0)
-        return (int)r;
-
     r = fill_descriptor_set(&set, board);
     if (r < 0)
         return (int)r;
@@ -369,93 +369,140 @@ restart:
 
 int monitor(int argc, char *argv[])
 {
+    ty_optline_context optl;
+    char *opt;
     ty_board *board = NULL;
     int outfd = -1;
     int r;
 
-    int c;
-    while ((c = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
-        switch (c) {
-        HANDLE_COMMON_OPTIONS(c, print_monitor_usage);
+    ty_optline_init_argv(&optl, argc, argv);
+    while ((opt = ty_optline_next_option(&optl))) {
+        if (strcmp(opt, "--help") == 0) {
+            print_monitor_usage(stdout);
+            return EXIT_SUCCESS;
+        } else if (strcmp(opt, "--baudrate") == 0 || strcmp(opt, "-b") == 0) {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                ty_log(TY_LOG_ERROR, "Option '--baudrate' takes an argument");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
 
-        case 's':
-            terminal_flags |= TY_TERMINAL_SILENT;
-            break;
-        case 'r':
-            terminal_flags |= TY_TERMINAL_RAW;
-            break;
+            errno = 0;
+            serial_config.baudrate = (uint32_t)strtoul(value, NULL, 10);
+            if (errno) {
+                ty_log(TY_LOG_ERROR, "--baudrate requires a number");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
+        } else if (strcmp(opt, "--databits") == 0 || strcmp(opt, "-d") == 0) {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                ty_log(TY_LOG_ERROR, "Option '--databits' takes an argument");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
 
-        case 'D':
-            if (strcmp(optarg, "input") == 0) {
+            serial_config.databits = (unsigned int)strtoul(value, NULL, 10);
+            if (serial_config.databits < 5 || serial_config.databits > 8) {
+                ty_log(TY_LOG_ERROR, "--databits must be one of: 5, 6, 7 or 8");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
+        } else if (strcmp(opt, "--stopbits") == 0 || strcmp(opt, "-p") == 0) {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                ty_log(TY_LOG_ERROR, "Option '--stopbits' takes an argument");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
+
+            serial_config.stopbits = (unsigned int)strtoul(value, NULL, 10);
+            if (serial_config.stopbits < 1 || serial_config.stopbits > 2) {
+                ty_log(TY_LOG_ERROR, "--stopbits must be one of: 1 or 2");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
+        } else if (strcmp(opt, "--direction") == 0 || strcmp(opt, "-D") == 0) {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                ty_log(TY_LOG_ERROR, "Option '--direction' takes an argument");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
+
+            if (strcmp(value, "input") == 0) {
                 directions = DIRECTION_INPUT;
-            } else if (strcmp(optarg, "output") == 0) {
+            } else if (strcmp(value, "output") == 0) {
                 directions = DIRECTION_OUTPUT;
-            } else if (strcmp(optarg, "both") == 0) {
+            } else if (strcmp(value, "both") == 0) {
                 directions = DIRECTION_INPUT | DIRECTION_OUTPUT;
             } else {
-                ty_log(TY_LOG_ERROR, "--direction must be one off input, output or both");
+                ty_log(TY_LOG_ERROR, "--direction must be one of: input, output or both");
                 print_monitor_usage(stderr);
                 return EXIT_FAILURE;
             }
-            break;
+        } else if (strcmp(opt, "--flow") == 0 || strcmp(opt, "-f") == 0) {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                ty_log(TY_LOG_ERROR, "Option '--flow' takes an argument");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
 
-        case 'b':
-            errno = 0;
-            device_rate = (uint32_t)strtoul(optarg, NULL, 10);
-            if (errno) {
-                ty_log(TY_LOG_ERROR, "--baud requires a number");
+            if (strcmp(value, "off") == 0) {
+                serial_config.rts = HS_SERIAL_CONFIG_RTS_OFF;
+                serial_config.xonxoff = HS_SERIAL_CONFIG_XONXOFF_OFF;
+            } else if (strcmp(value, "xonxoff") == 0) {
+                serial_config.rts = HS_SERIAL_CONFIG_RTS_OFF;
+                serial_config.xonxoff = HS_SERIAL_CONFIG_XONXOFF_INOUT;
+            } else if (strcmp(value, "rtscts") == 0) {
+                serial_config.rts = HS_SERIAL_CONFIG_RTS_FLOW;
+                serial_config.xonxoff = HS_SERIAL_CONFIG_XONXOFF_OFF;
+            } else if (strcmp(value, "off") != 0) {
+                ty_log(TY_LOG_ERROR, "--flow must be one of: off, rtscts or xonxoff");
                 print_monitor_usage(stderr);
                 return EXIT_FAILURE;
             }
-            break;
-        case 'd':
-           device_flags &= ~HS_SERIAL_MASK_CSIZE;
-            if (strcmp(optarg, "5") == 0) {
-                device_flags |= HS_SERIAL_CSIZE_5BITS;
-            } else if (strcmp(optarg, "6") == 0) {
-                device_flags |= HS_SERIAL_CSIZE_6BITS;
-            } else if (strcmp(optarg, "7") == 0) {
-                device_flags |= HS_SERIAL_CSIZE_7BITS;
-            } else if (strcmp(optarg, "8") != 0) {
-                ty_log(TY_LOG_ERROR, "--databits must be one off 5, 6, 7 or 8");
+        } else if (strcmp(opt, "--parity") == 0 || strcmp(opt, "-y") == 0) {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                ty_log(TY_LOG_ERROR, "Option '--parity' takes an argument");
                 print_monitor_usage(stderr);
                 return EXIT_FAILURE;
             }
-        case 'f':
-            device_flags &= ~HS_SERIAL_MASK_FLOW;
-            if (strcmp(optarg, "x") == 0 || strcmp(optarg, "xonxoff") == 0) {
-                device_flags |= HS_SERIAL_FLOW_XONXOFF;
-            } else if (strcmp(optarg, "h") == 0 || strcmp(optarg, "rtscts") == 0) {
-                device_flags |= HS_SERIAL_FLOW_RTSCTS;
-            } else if (strcmp(optarg, "n") != 0 && strcmp(optarg, "none") == 0) {
-                ty_log(TY_LOG_ERROR, "--flow must be one off x (xonxoff), h (rtscts) or n (none)");
-                print_monitor_usage(stderr);
-                return EXIT_FAILURE;
-            }
-            break;
-        case MONITOR_OPTION_NORESET:
-            device_flags |= HS_SERIAL_CLOSE_NOHUP;
-            break;
-        case 'p':
-            device_flags &= ~HS_SERIAL_MASK_PARITY;
-            if (strcmp(optarg, "o") == 0 || strcmp(optarg, "odd") == 0) {
-                device_flags |= HS_SERIAL_PARITY_ODD;
-            } else if (strcmp(optarg, "e") == 0 || strcmp(optarg, "even") == 0) {
-                device_flags |= HS_SERIAL_PARITY_EVEN;
-            } else if (strcmp(optarg, "n") != 0 && strcmp(optarg, "none") != 0) {
-                ty_log(TY_LOG_ERROR, "--parity must be one off o (odd), e (even) or n (none)");
-                print_monitor_usage(stderr);
-                return EXIT_FAILURE;
-            }
-            break;
 
-        case 'R':
+            if (strcmp(value, "off") == 0) {
+                serial_config.parity = HS_SERIAL_CONFIG_PARITY_OFF;
+            } else if (strcmp(value, "even") == 0) {
+                serial_config.parity = HS_SERIAL_CONFIG_PARITY_EVEN;
+            } else if (strcmp(value, "odd") == 0) {
+                serial_config.parity = HS_SERIAL_CONFIG_PARITY_ODD;
+            } else if (strcmp(value, "mark") == 0) {
+                serial_config.parity = HS_SERIAL_CONFIG_PARITY_MARK;
+            } else if (strcmp(value, "space") == 0) {
+                serial_config.parity = HS_SERIAL_CONFIG_PARITY_SPACE;
+            } else {
+                ty_log(TY_LOG_ERROR, "--parity must be one of: off, even, mark or space");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
+        } else if (strcmp(opt, "--raw") == 0 || strcmp(opt, "-r") == 0) {
+            terminal_flags |= TY_TERMINAL_RAW;
+        } else if (strcmp(opt, "--reconnect") == 0 || strcmp(opt, "-R") == 0) {
             reconnect = true;
-            break;
+        } else if (strcmp(opt, "--silent") == 0 || strcmp(opt, "-s") == 0) {
+            terminal_flags |= TY_TERMINAL_SILENT;
+        } else if (strcmp(opt, "--timeout-eof") == 0) {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                ty_log(TY_LOG_ERROR, "Option '--timeout-eof' takes an argument");
+                print_monitor_usage(stderr);
+                return EXIT_FAILURE;
+            }
 
-        case MONITOR_OPTION_TIMEOUT_EOF:
             errno = 0;
-            timeout_eof = (int)strtol(optarg, NULL, 10);
+            timeout_eof = (int)strtol(value, NULL, 10);
             if (errno) {
                 ty_log(TY_LOG_ERROR, "--timeout requires a number");
                 print_monitor_usage(stderr);
@@ -463,11 +510,12 @@ int monitor(int argc, char *argv[])
             }
             if (timeout_eof < 0)
                 timeout_eof = -1;
-            break;
+        } else if (!parse_common_option(&optl, opt)) {
+            print_monitor_usage(stderr);
+            return EXIT_FAILURE;
         }
     }
-
-    if (argc > optind) {
+    if (ty_optline_consume_non_option(&optl)) {
         ty_log(TY_LOG_ERROR, "No positional argument is allowed");
         print_monitor_usage(stderr);
         return EXIT_FAILURE;

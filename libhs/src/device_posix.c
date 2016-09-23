@@ -32,12 +32,13 @@
 #include "device_posix_priv.h"
 #include "hs/platform.h"
 
-static int open_posix_device(hs_device *dev, hs_handle **rh)
+static int open_posix_device(hs_device *dev, hs_handle_mode mode, hs_handle **rh)
 {
     hs_handle *h;
 #ifdef __APPLE__
     unsigned int retry = 4;
 #endif
+    int fd_flags;
     int r;
 
     h = calloc(1, sizeof(*h));
@@ -46,9 +47,23 @@ static int open_posix_device(hs_device *dev, hs_handle **rh)
         goto error;
     }
     h->dev = hs_device_ref(dev);
+    h->mode = mode;
+
+    fd_flags = O_CLOEXEC | O_NOCTTY | O_NONBLOCK;
+    switch (mode) {
+    case HS_HANDLE_MODE_READ:
+        fd_flags |= O_RDONLY;
+        break;
+    case HS_HANDLE_MODE_WRITE:
+        fd_flags |= O_WRONLY;
+        break;
+    case HS_HANDLE_MODE_RW:
+        fd_flags |= O_RDWR;
+        break;
+    }
 
 restart:
-    h->fd = open(dev->path, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+    h->fd = open(dev->path, fd_flags);
     if (h->fd < 0) {
         switch (errno) {
         case EINTR:
@@ -82,10 +97,44 @@ restart:
         goto error;
     }
 
-#ifdef __APPLE__
-    if (dev->type == HS_DEVICE_TYPE_SERIAL)
-        ioctl(h->fd, TIOCSDTR);
-#endif
+    if (dev->type == HS_DEVICE_TYPE_SERIAL) {
+        struct termios tio;
+        int modem_bits;
+
+        r = tcgetattr(h->fd, &tio);
+        if (r < 0) {
+            r = hs_error(HS_ERROR_SYSTEM, "tcgetattr() failed on '%s': %s", dev->path,
+                         strerror(errno));
+            goto error;
+        }
+
+        /* Use raw I/O and sane settings, set DTR by default even on platforms that don't
+           enforce that. */
+        cfmakeraw(&tio);
+        tio.c_cc[VMIN] = 0;
+        tio.c_cc[VTIME] = 0;
+        tio.c_cflag |= CLOCAL | CREAD | HUPCL;
+        modem_bits = TIOCM_DTR;
+
+        r = tcsetattr(h->fd, TCSANOW, &tio);
+        if (r < 0) {
+            r = hs_error(HS_ERROR_SYSTEM, "tcsetattr() failed on '%s': %s", dev->path,
+                         strerror(errno));
+            goto error;
+        }
+        r = ioctl(h->fd, TIOCMBIS, &modem_bits);
+        if (r < 0) {
+            r = hs_error(HS_ERROR_SYSTEM, "ioctl(TIOCMBIS, TIOCM_DTR) failed on '%s': %s",
+                         dev->path, strerror(errno));
+            goto error;
+        }
+        r = tcflush(h->fd, TCIFLUSH);
+        if (r < 0) {
+            r = hs_error(HS_ERROR_SYSTEM, "tcflush(TCIFLUSH) failed on '%s': %s",
+                         dev->path, strerror(errno));
+            goto error;
+        }
+    }
 
     *rh = h;
     return 0;
@@ -98,6 +147,11 @@ error:
 static void close_posix_device(hs_handle *h)
 {
     if (h) {
+#ifdef __linux__
+        // Only used for hidraw to work around a bug on old kernels
+        free(h->read_buf);
+#endif
+
         close(h->fd);
         hs_device_unref(h->dev);
     }

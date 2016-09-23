@@ -13,10 +13,12 @@
 
 #include "tyqt/board.hpp"
 #include "tyqt/database.hpp"
+#include "tyqt/monitor.hpp"
 
 using namespace std;
 
 #define MAX_RECENT_FIRMWARES 4
+#define SERIAL_LOG_DELIMITER "\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
 
 Board::Board(ty_board *board, QObject *parent)
     : QObject(parent), board_(ty_board_ref(board))
@@ -31,19 +33,6 @@ Board::Board(ty_board *board, QObject *parent)
     error_timer_.setInterval(TY_SHOW_ERROR_TIMEOUT);
     error_timer_.setSingleShot(true);
     connect(&error_timer_, &QTimer::timeout, this, &Board::updateStatus);
-
-    loadSettings();
-}
-
-shared_ptr<Board> Board::createBoard(ty_board *board)
-{
-    // Work around the private constructor for make_shared()
-    struct BoardSharedEnabler : public Board {
-        BoardSharedEnabler(ty_board *board)
-            : Board(board) {}
-    };
-
-    return make_shared<BoardSharedEnabler>(board);
 }
 
 Board::~Board()
@@ -52,7 +41,7 @@ Board::~Board()
     ty_board_unref(board_);
 }
 
-void Board::loadSettings()
+void Board::loadSettings(Monitor *monitor)
 {
     auto tag = db_.get("tag", "").toString();
     int r = ty_board_set_tag(board_, tag.isEmpty() ? nullptr : tag.toLocal8Bit().constData());
@@ -79,12 +68,14 @@ void Board::loadSettings()
     serial_decoder_.reset(serial_codec_->makeDecoder());
     clear_on_reset_ = db_.get("clearOnReset", false).toBool();
     serial_document_.setMaximumBlockCount(db_.get("scrollBackLimit", 200000).toInt());
-    serial_attach_ = db_.get("attachMonitor", true).toBool();
+    enable_serial_ = db_.get("enableSerial", monitor ? monitor->serialByDefault() : false).toBool();
+    serial_log_size_ = db_.get(
+        "serialLogSize",
+        static_cast<quint64>(monitor ? monitor->serialLogSize() : 0)).toULongLong();
 
     /* Even if the user decides to enable persistence for ambiguous identifiers,
        we still don't want to cache the board model. */
-    if (!ty_board_model_get_code_size(ty_board_get_model(board_)) &&
-            hasCapability(TY_BOARD_CAPABILITY_UNIQUE)) {
+    if (hasCapability(TY_BOARD_CAPABILITY_UNIQUE)) {
         auto model_name = cache_.get("model");
         if (model_name.isValid()) {
             auto model = ty_board_model_find(model_name.toString().toUtf8().constData());
@@ -93,15 +84,28 @@ void Board::loadSettings()
         }
     }
 
-    if (serial_attach_ && hasCapability(TY_BOARD_CAPABILITY_SERIAL)) {
-        serial_attach_ = openSerialInterface();
-    } else {
-        closeSerialInterface();
-    }
+    updateSerialInterface();
+    serial_log_file_.close();
+    updateSerialLogState();
 
     updateStatus();
     emit infoChanged();
     emit settingsChanged();
+}
+
+bool Board::updateSerialInterface()
+{
+    if (enable_serial_ && hasCapability(TY_BOARD_CAPABILITY_SERIAL)) {
+        openSerialInterface();
+        if (!serial_iface_) {
+            enable_serial_ = false;
+            return false;
+        }
+    } else {
+        closeSerialInterface();
+    }
+
+    return true;
 }
 
 bool Board::matchesTag(const QString &id)
@@ -216,14 +220,6 @@ void Board::updateStatus()
     emit statusChanged();
 }
 
-void Board::appendToSerialDocument(const QString &s)
-{
-    QTextCursor cursor(&serial_document_);
-    cursor.movePosition(QTextCursor::End);
-
-    cursor.insertText(s);
-}
-
 QStringList Board::makeCapabilityList(uint16_t capabilities)
 {
     QStringList list;
@@ -320,20 +316,47 @@ TaskInterface Board::reboot()
     return watchTask(make_task<TyTask>(task));
 }
 
-bool Board::sendSerial(const QByteArray &buf)
+TaskInterface Board::sendSerial(const QByteArray &buf)
 {
-    ssize_t r = ty_board_serial_write(board_, buf.data(), buf.size());
-    if (r < 0) {
-        emit notifyLog(TY_LOG_ERROR, ty_error_last_message());
-        return false;
-    }
+    ty_task *task;
+    int r;
 
-    return true;
+    r = ty_send(board_, buf.data(), buf.size(), &task);
+    if (r < 0)
+        return watchTask(make_task<FailedTask>(ty_error_last_message()));
+    ty_task_set_pool(task, pool_);
+
+    return watchTask(make_task<TyTask>(task));
 }
 
-bool Board::sendSerial(const QString &s)
+TaskInterface Board::sendSerial(const QString &s)
 {
     return sendSerial(serial_codec_->fromUnicode(s));
+}
+
+TaskInterface Board::sendFile(const QString &filename)
+{
+    ty_task *task;
+    int r;
+
+    r = ty_send_file(board_, filename.toLocal8Bit().constData(), &task);
+    if (r < 0)
+        return watchTask(make_task<FailedTask>(ty_error_last_message()));
+    ty_task_set_pool(task, pool_);
+
+    return watchTask(make_task<TyTask>(task));
+}
+
+void Board::appendFakeSerialRead(const QString &s)
+{
+    auto buf = serial_codec_->fromUnicode(s);
+    QMutexLocker locker(&serial_lock_);
+    writeToSerialLog(buf.constData(), buf.size());
+    locker.unlock();
+
+    QTextCursor cursor(&serial_document_);
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(s);
 }
 
 void Board::setTag(const QString &tag)
@@ -423,21 +446,28 @@ void Board::setScrollBackLimit(unsigned int limit)
     emit settingsChanged();
 }
 
-void Board::setAttachMonitor(bool attach_monitor)
+void Board::setEnableSerial(bool enable)
 {
-    if (attach_monitor == serial_attach_)
+    if (enable == enable_serial_)
         return;
 
-    if (attach_monitor && hasCapability(TY_BOARD_CAPABILITY_SERIAL)) {
-        attach_monitor = openSerialInterface();
-    } else {
-        closeSerialInterface();
-    }
+    enable_serial_ = enable;
+    if (updateSerialInterface())
+        db_.put("enableSerial", enable);
 
-    serial_attach_ = attach_monitor;
-
-    db_.put("attachMonitor", attach_monitor);
     updateStatus();
+    emit settingsChanged();
+}
+
+void Board::setSerialLogSize(size_t size)
+{
+    if (size == serial_log_size_)
+        return;
+
+    serial_log_size_ = size;
+    updateSerialLogState();
+
+    db_.put("serialLogSize", static_cast<quint64>(size));
     emit settingsChanged();
 }
 
@@ -476,6 +506,27 @@ TaskInterface Board::startReboot()
     return task;
 }
 
+TaskInterface Board::startSendSerial(const QByteArray &buf)
+{
+    auto task = sendSerial(buf);
+    task.start();
+    return task;
+}
+
+TaskInterface Board::startSendSerial(const QString &s)
+{
+    auto task = sendSerial(s);
+    task.start();
+    return task;
+}
+
+TaskInterface Board::startSendFile(const QString &filename)
+{
+    auto task = sendFile(filename);
+    task.start();
+    return task;
+}
+
 void Board::notifyLog(ty_log_level level, const QString &msg)
 {
     Q_UNUSED(msg);
@@ -491,10 +542,11 @@ void Board::serialReceived(ty_descriptor desc)
     Q_UNUSED(desc);
 
     QMutexLocker locker(&serial_lock_);
+
     ty_error_mask(TY_ERROR_MODE);
     ty_error_mask(TY_ERROR_IO);
 
-    bool was_empty = !serial_buf_len_;
+    size_t previous_len = serial_buf_len_;
     /* On OSX El Capitan (at least), serial device reads are often partial (512 and 1020 bytes
        reads happen pretty often), so try hard to empty the OS buffer. The Qt event loop may not
        give us back control before some time, and we want to avoid buffer overruns. */
@@ -503,7 +555,7 @@ void Board::serialReceived(ty_descriptor desc)
             break;
 
         int r = ty_board_serial_read(board_, serial_buf_ + serial_buf_len_,
-                                      sizeof(serial_buf_) - serial_buf_len_, 0);
+                                     sizeof(serial_buf_) - serial_buf_len_, 0);
         if (r < 0) {
             serial_notifier_.clear();
             break;
@@ -515,20 +567,64 @@ void Board::serialReceived(ty_descriptor desc)
 
     ty_error_unmask();
     ty_error_unmask();
+
+    if (serial_log_file_.isOpen())
+        writeToSerialLog(serial_buf_ + previous_len, serial_buf_len_ - previous_len);
+
     locker.unlock();
 
-    if (was_empty && serial_buf_len_)
-        QMetaObject::invokeMethod(this, "updateSerialDocument", Qt::QueuedConnection);
+    if (!previous_len && serial_buf_len_)
+        QMetaObject::invokeMethod(this, "appendBufferToSerialDocument", Qt::QueuedConnection);
 }
 
-void Board::updateSerialDocument()
+// You need to lock serial_lock_ before you call this
+void Board::writeToSerialLog(const char *buf, size_t len)
+{
+    serial_log_file_.unsetError();
+
+    qint64 pos = serial_log_file_.pos();
+    if (pos + len > serial_log_size_) {
+        auto part_len = serial_log_size_ - pos;
+        serial_log_file_.write(buf, part_len);
+        serial_log_file_.seek(0);
+        serial_log_file_.write(buf + part_len, len - part_len);
+    } else {
+        serial_log_file_.write(buf, len);
+    }
+
+    if (!serial_log_file_.atEnd()) {
+        pos = serial_log_file_.pos();
+        if (pos + sizeof(SERIAL_LOG_DELIMITER) >= serial_log_size_) {
+            serial_log_file_.resize(pos);
+            serial_log_file_.seek(0);
+        } else {
+            serial_log_file_.write(SERIAL_LOG_DELIMITER);
+            serial_log_file_.seek(pos);
+        }
+    }
+
+    if (serial_log_file_.error() != QFileDevice::NoError) {
+        auto error_msg = QString("Closed serial log file after error: %1")
+                         .arg(serial_log_file_.errorString());
+        ty_log(TY_LOG_ERROR, "%s", error_msg.toUtf8().constData());
+        QMetaObject::invokeMethod(this, "notifyLog", Qt::QueuedConnection,
+                                  Q_ARG(ty_log_level, TY_LOG_ERROR), Q_ARG(QString, error_msg));
+
+        serial_log_file_.close();
+        emit settingsChanged();
+    }
+}
+
+void Board::appendBufferToSerialDocument()
 {
     QMutexLocker locker(&serial_lock_);
     auto str = serial_decoder_->toUnicode(serial_buf_, serial_buf_len_);
     serial_buf_len_ = 0;
     locker.unlock();
 
-    appendToSerialDocument(str);
+    QTextCursor cursor(&serial_document_);
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(str);
 }
 
 void Board::notifyFinished(bool success, std::shared_ptr<void> result)
@@ -544,15 +640,21 @@ void Board::notifyFinished(bool success, std::shared_ptr<void> result)
 
 void Board::refreshBoard()
 {
-    if (hasCapability(TY_BOARD_CAPABILITY_SERIAL) && serial_attach_) {
-        openSerialInterface();
-    } else {
-        closeSerialInterface();
-    }
+    updateSerialInterface();
 
     if (ty_board_get_state(board_) == TY_BOARD_STATE_DROPPED) {
         emit dropped();
         return;
+    }
+
+    if (clear_on_reset_) {
+        if (hasCapability(TY_BOARD_CAPABILITY_SERIAL)) {
+            if (serial_clear_when_available_)
+                serial_document_.clear();
+            serial_clear_when_available_ = false;
+        } else {
+            serial_clear_when_available_ = true;
+        }
     }
 
     auto model = this->model();
@@ -582,10 +684,6 @@ bool Board::openSerialInterface()
     ty_board_interface_get_descriptors(serial_iface_, &set, 1);
     serial_notifier_.setDescriptorSet(&set);
 
-    if (clear_on_reset_)
-        serial_document_.clear();
-
-    emit interfacesChanged();
     return true;
 }
 
@@ -597,8 +695,22 @@ void Board::closeSerialInterface()
     serial_notifier_.clear();
     ty_board_interface_close(serial_iface_);
     serial_iface_ = nullptr;
+}
 
-    emit interfacesChanged();
+void Board::updateSerialLogState()
+{
+    if (serial_log_file_.fileName().isEmpty())
+        return;
+
+    if (serial_log_size_) {
+        if (!serial_log_file_.isOpen())
+            serial_log_file_.open(QIODevice::WriteOnly);
+        if (serial_log_file_.isOpen() && static_cast<size_t>(serial_log_file_.size()) > serial_log_size_)
+            serial_log_file_.resize(serial_log_size_);
+    } else {
+        serial_log_file_.close();
+        serial_log_file_.remove();
+    }
 }
 
 TaskInterface Board::watchTask(TaskInterface task)

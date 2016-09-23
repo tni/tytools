@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>542</width>
-    <height>384</height>
+    <width>558</width>
+    <height>445</height>
    </rect>
   </property>
   <property name="contextMenuPolicy">
@@ -81,20 +81,6 @@
              </property>
             </widget>
            </item>
-           <item row="0" column="2">
-            <widget class="QLabel" name="label_2">
-             <property name="text">
-              <string>Status:</string>
-             </property>
-            </widget>
-           </item>
-           <item row="1" column="2">
-            <widget class="QLineEdit" name="statusText">
-             <property name="readOnly">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
            <item row="1" column="1">
             <widget class="QLineEdit" name="modelText">
              <property name="readOnly">
@@ -113,13 +99,6 @@
          </item>
          <item>
           <layout class="QGridLayout" name="gridLayout_2">
-           <item row="1" column="2">
-            <widget class="QLineEdit" name="locationText">
-             <property name="readOnly">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
            <item row="0" column="2">
             <widget class="QLabel" name="label_3">
              <property name="text">
@@ -134,21 +113,46 @@
              </property>
             </widget>
            </item>
-           <item row="1" column="1">
-            <widget class="QLineEdit" name="serialText">
+           <item row="1" column="2">
+            <widget class="QLineEdit" name="locationText">
              <property name="readOnly">
               <bool>true</bool>
              </property>
             </widget>
            </item>
-           <item row="1" column="3">
+           <item row="1" column="1">
+            <widget class="QLineEdit" name="serialNumberText">
+             <property name="readOnly">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QGridLayout" name="gridLayout_3">
+           <item row="1" column="0">
+            <widget class="QLineEdit" name="statusText">
+             <property name="readOnly">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="1">
             <widget class="QLineEdit" name="descriptionText">
              <property name="readOnly">
               <bool>true</bool>
              </property>
             </widget>
            </item>
-           <item row="0" column="3">
+           <item row="0" column="0">
+            <widget class="QLabel" name="label_2">
+             <property name="text">
+              <string>Status:</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
             <widget class="QLabel" name="label_10">
              <property name="text">
               <string>Description:</string>
@@ -171,6 +175,12 @@
              <horstretch>0</horstretch>
              <verstretch>1</verstretch>
             </sizepolicy>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>40</height>
+            </size>
            </property>
            <property name="indentation">
             <number>0</number>
@@ -204,13 +214,13 @@
          </item>
         </layout>
        </widget>
-       <widget class="QWidget" name="monitorTab">
+       <widget class="QWidget" name="serialTab">
         <attribute name="title">
-         <string>&amp;Monitor</string>
+         <string>S&amp;erial</string>
         </attribute>
         <layout class="QVBoxLayout" name="verticalLayout_3">
          <item>
-          <widget class="EnhancedPlainText" name="monitorText">
+          <widget class="EnhancedPlainText" name="serialText">
            <property name="minimumSize">
             <size>
              <width>240</width>
@@ -240,7 +250,7 @@
          <item>
           <layout class="QHBoxLayout" name="horizontalLayout_5">
            <item>
-            <widget class="QLineEdit" name="monitorEdit">
+            <widget class="QLineEdit" name="serialEdit">
              <property name="placeholderText">
               <string>Send data...</string>
              </property>
@@ -263,13 +273,16 @@
          </item>
         </layout>
        </widget>
-       <widget class="QWidget" name="uploadTab">
+       <widget class="QWidget" name="optionsTab">
         <attribute name="title">
-         <string>&amp;Settings</string>
+         <string>&amp;Options</string>
         </attribute>
         <layout class="QVBoxLayout" name="verticalLayout_2">
          <item>
-          <widget class="QGroupBox" name="groupBox">
+          <widget class="EnhancedGroupBox" name="groupBox">
+           <property name="focusPolicy">
+            <enum>Qt::StrongFocus</enum>
+           </property>
            <property name="title">
             <string>Upload</string>
            </property>
@@ -319,9 +332,12 @@
           </widget>
          </item>
          <item>
-          <widget class="QGroupBox" name="groupBox_2">
+          <widget class="EnhancedGroupBox" name="groupBox_2">
+           <property name="focusPolicy">
+            <enum>Qt::StrongFocus</enum>
+           </property>
            <property name="title">
-            <string>Monitor</string>
+            <string>Serial</string>
            </property>
            <layout class="QVBoxLayout" name="verticalLayout_6">
             <item>
@@ -383,7 +399,7 @@
               <item>
                <widget class="QLabel" name="label_8">
                 <property name="text">
-                 <string>Keep:</string>
+                 <string>Show:</string>
                 </property>
                </widget>
               </item>
@@ -400,6 +416,65 @@
                 </property>
                 <property name="maximum">
                  <number>500000</number>
+                </property>
+                <property name="singleStep">
+                 <number>100</number>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QLabel" name="serialLogFileLabel">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Ignored" vsizetype="Preferred">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="font">
+               <font>
+                <pointsize>8</pointsize>
+                <italic>true</italic>
+               </font>
+              </property>
+              <property name="text">
+               <string notr="true">Serial log in '?'</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_4">
+              <item>
+               <widget class="QLabel" name="label_11">
+                <property name="text">
+                 <string>Log size:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <spacer name="horizontalSpacer_2">
+                <property name="orientation">
+                 <enum>Qt::Horizontal</enum>
+                </property>
+                <property name="sizeHint" stdset="0">
+                 <size>
+                  <width>40</width>
+                  <height>20</height>
+                 </size>
+                </property>
+               </spacer>
+              </item>
+              <item>
+               <widget class="QSpinBox" name="serialLogSizeSpin">
+                <property name="accelerated">
+                 <bool>true</bool>
+                </property>
+                <property name="suffix">
+                 <string> kB</string>
+                </property>
+                <property name="maximum">
+                 <number>999999</number>
                 </property>
                 <property name="singleStep">
                  <number>100</number>
@@ -489,8 +564,8 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>542</width>
-     <height>23</height>
+     <width>558</width>
+     <height>20</height>
     </rect>
    </property>
    <property name="contextMenuPolicy">
@@ -502,7 +577,7 @@
     </property>
     <widget class="QMenu" name="menuRecentFirmwares">
      <property name="title">
-      <string>Upload recent &amp;firmware</string>
+      <string>Upload r&amp;ecent firmware</string>
      </property>
     </widget>
     <addaction name="separator"/>
@@ -530,10 +605,7 @@
      <string>&amp;View</string>
     </property>
     <addaction name="actionNewWindow"/>
-    <addaction name="actionMinimalInterface"/>
-    <addaction name="separator"/>
-    <addaction name="actionClearMonitor"/>
-    <addaction name="actionAttachMonitor"/>
+    <addaction name="actionCompactMode"/>
    </widget>
    <widget class="QMenu" name="menuTools">
     <property name="title">
@@ -547,7 +619,22 @@
     <addaction name="separator"/>
     <addaction name="actionPreferences"/>
    </widget>
+   <widget class="QMenu" name="menuSerial">
+    <property name="title">
+     <string>&amp;Serial</string>
+    </property>
+    <widget class="QMenu" name="menuSendHistory">
+     <property name="title">
+      <string>Send &amp;Recent</string>
+     </property>
+    </widget>
+    <addaction name="actionEnableSerial"/>
+    <addaction name="menuSendHistory"/>
+    <addaction name="actionSendFile"/>
+    <addaction name="actionClearSerial"/>
+   </widget>
    <addaction name="menuFile"/>
+   <addaction name="menuSerial"/>
    <addaction name="menuView"/>
    <addaction name="menuTools"/>
    <addaction name="menuHelp"/>
@@ -617,7 +704,7 @@
    <addaction name="actionReset"/>
    <addaction name="actionReboot"/>
    <addaction name="separator"/>
-   <addaction name="actionAttachMonitor"/>
+   <addaction name="actionEnableSerial"/>
   </widget>
   <action name="actionUpload">
    <property name="icon">
@@ -686,15 +773,15 @@
     <string>&amp;Report a bug</string>
    </property>
   </action>
-  <action name="actionMinimalInterface">
+  <action name="actionCompactMode">
    <property name="checkable">
     <bool>true</bool>
    </property>
    <property name="text">
-    <string>&amp;Minimal Interface</string>
+    <string>&amp;Compact Mode</string>
    </property>
    <property name="toolTip">
-    <string>Minimal Interface</string>
+    <string>Compact Mode</string>
    </property>
    <property name="shortcut">
     <string>Ctrl+H</string>
@@ -708,12 +795,12 @@
     <string>Ctrl+N</string>
    </property>
   </action>
-  <action name="actionClearMonitor">
+  <action name="actionClearSerial">
    <property name="text">
-    <string>&amp;Clear Monitor</string>
+    <string>&amp;Clear Serial</string>
    </property>
    <property name="toolTip">
-    <string>Clear Monitor</string>
+    <string>Clear Serial</string>
    </property>
    <property name="shortcut">
     <string>Ctrl+Alt+X</string>
@@ -724,7 +811,7 @@
     <string>&amp;Integrate to Arduino</string>
    </property>
   </action>
-  <action name="actionAttachMonitor">
+  <action name="actionEnableSerial">
    <property name="checkable">
     <bool>true</bool>
    </property>
@@ -733,23 +820,26 @@
      <normaloff>:/monitor</normaloff>:/monitor</iconset>
    </property>
    <property name="text">
-    <string>&amp;Monitor</string>
+    <string>&amp;Enable Serial</string>
+   </property>
+   <property name="iconText">
+    <string>Serial</string>
    </property>
    <property name="toolTip">
-    <string>Monitor</string>
+    <string>Serial</string>
    </property>
    <property name="shortcut">
-    <string>Ctrl+M</string>
+    <string>Ctrl+S</string>
    </property>
   </action>
   <action name="actionResetApp">
    <property name="text">
-    <string>Reset Application</string>
+    <string>&amp;Reset Application</string>
    </property>
   </action>
   <action name="actionResetSettingsApp">
    <property name="text">
-    <string>Reset Settings &amp;&amp; Application</string>
+    <string>Reset &amp;Settings &amp;&amp; Application</string>
    </property>
    <property name="toolTip">
     <string>Reset Settings &amp; Application</string>
@@ -775,10 +865,15 @@
   </action>
   <action name="actionRenameBoard">
    <property name="text">
-    <string>R&amp;ename board</string>
+    <string>Ren&amp;ame board</string>
    </property>
    <property name="toolTip">
     <string>Rename board</string>
+   </property>
+  </action>
+  <action name="actionSendFile">
+   <property name="text">
+    <string>Send &amp;File</string>
    </property>
   </action>
  </widget>
@@ -788,26 +883,35 @@
    <extends>QPlainTextEdit</extends>
    <header>enhanced_plain_text.hpp</header>
   </customwidget>
+  <customwidget>
+   <class>EnhancedGroupBox</class>
+   <extends>QGroupBox</extends>
+   <header>enhanced_group_box.hpp</header>
+   <container>1</container>
+  </customwidget>
  </customwidgets>
  <tabstops>
   <tabstop>boardList</tabstop>
   <tabstop>tabWidget</tabstop>
   <tabstop>idText</tabstop>
   <tabstop>modelText</tabstop>
-  <tabstop>statusText</tabstop>
-  <tabstop>serialText</tabstop>
+  <tabstop>serialNumberText</tabstop>
   <tabstop>locationText</tabstop>
+  <tabstop>statusText</tabstop>
   <tabstop>descriptionText</tabstop>
   <tabstop>interfaceTree</tabstop>
-  <tabstop>monitorText</tabstop>
-  <tabstop>monitorEdit</tabstop>
+  <tabstop>serialText</tabstop>
+  <tabstop>serialEdit</tabstop>
   <tabstop>sendButton</tabstop>
+  <tabstop>groupBox</tabstop>
   <tabstop>firmwarePath</tabstop>
   <tabstop>firmwareBrowseButton</tabstop>
   <tabstop>resetAfterCheck</tabstop>
+  <tabstop>groupBox_2</tabstop>
   <tabstop>codecComboBox</tabstop>
   <tabstop>clearOnResetCheck</tabstop>
   <tabstop>scrollBackLimitSpin</tabstop>
+  <tabstop>serialLogSizeSpin</tabstop>
  </tabstops>
  <resources>
   <include location="tyqt.qrc"/>

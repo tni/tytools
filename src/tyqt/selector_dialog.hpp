@@ -8,37 +8,30 @@
 #ifndef SELECTOR_DIALOG_HH
 #define SELECTOR_DIALOG_HH
 
-#include <QIdentityProxyModel>
-
 #include <memory>
+#include <vector>
 
 #include "ui_selector_dialog.h"
 
 class Board;
 class Monitor;
-
-class SelectorDialogModelFilter: public QIdentityProxyModel {
-    Q_OBJECT
-
-public:
-    SelectorDialogModelFilter(QObject *parent = nullptr)
-        : QIdentityProxyModel(parent) {}
-
-    int columnCount(const QModelIndex &parent) const override;
-    QVariant data(const QModelIndex &index, int role) const override;
-};
+class SelectorDialogModel;
 
 class SelectorDialog : public QDialog, private Ui::SelectorDialog {
     Q_OBJECT
 
     Monitor *monitor_;
-    SelectorDialogModelFilter monitor_model_;
+    SelectorDialogModel *monitor_model_;
     QString action_;
 
-    std::shared_ptr<Board> current_board_;
+    std::vector<std::shared_ptr<Board>> selected_boards_;
 
 public:
     SelectorDialog(QWidget *parent = nullptr);
+
+    void setExtendedSelection(bool extended);
+    bool setExtendedSelection() const
+        { return tree->selectionMode() == QAbstractItemView::ExtendedSelection; }
 
     void setAction(const QString &action);
     QString action() const { return action_; }
@@ -46,16 +39,13 @@ public:
     void setDescription(const QString &desc) { descriptionLabel->setText(desc); }
     QString description() const { return descriptionLabel->text(); }
 
-    std::shared_ptr<Board> currentBoard() const { return current_board_; }
-    std::shared_ptr<Board> selectedBoard() const;
+    std::vector<std::shared_ptr<Board>> selectedBoards() const { return selected_boards_; }
 
 protected slots:
-    void selectionChanged(const QItemSelection &selected, const QItemSelection &previous);
-    void done(int result) override;
+    void updateSelection();
 
 signals:
-    void currentChanged(Board *board);
-    void boardSelected(Board *board);
+    void selectionChanged();
 };
 
 #endif

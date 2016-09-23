@@ -100,12 +100,6 @@ static int add_board(ty_monitor *monitor, ty_board_interface *iface, ty_board **
     r = (*iface->model->family->update_board)(iface, board);
     if (r <= 0)
         goto error;
-
-    r = asprintf(&board->id, "%"PRIu64"-%s", board->serial, board->model->family->name);
-    if (r < 0) {
-        r = ty_error(TY_ERROR_MEMORY, NULL);
-        goto error;
-    }
     board->tag = board->id;
 
     board->monitor = monitor;
@@ -127,7 +121,7 @@ static void close_board(ty_board *board)
 
     ty_list_replace(&board->interfaces, &ifaces);
     memset(board->cap2iface, 0, sizeof(board->cap2iface));
-    board->capabilities = 0;
+    board->capabilities &= 1 << TY_BOARD_CAPABILITY_UNIQUE;
 
     ty_mutex_unlock(&board->interfaces_lock);
 
@@ -207,10 +201,9 @@ static int open_new_interface(hs_device *dev, ty_board_interface **riface)
         const ty_board_family *family = *cur;
 
         ty_error_mask(TY_ERROR_NOT_FOUND);
-        r = (*family->open_interface)(iface);
+        r = (*family->load_interface)(iface);
         ty_error_unmask();
         if (r < 0) {
-            // FIXME: propagate the errors when the initial enumeration abortion problem is fixed
             if (r == TY_ERROR_NOT_FOUND || r == TY_ERROR_ACCESS)
                 r = 0;
             goto error;
@@ -253,9 +246,14 @@ static int add_interface(ty_monitor *monitor, hs_device *dev)
     board = find_board(monitor, hs_device_get_location(dev));
 
     if (board) {
+        bool update_tag_pointer = false;
+        if (board->tag == board->id)
+            update_tag_pointer = true;
         r = (*iface->model->family->update_board)(iface, board);
         if (r < 0)
             goto error;
+        if (update_tag_pointer)
+            board->tag = board->id;
 
         /* The family function update_board() returns 1 if the interface is compatible with
            this board, or 0 if not. In the latter case, the old board is dropped and a new
@@ -337,7 +335,7 @@ static int remove_interface(ty_monitor *monitor, hs_device *dev)
     ty_board_interface_unref(iface);
 
     memset(board->cap2iface, 0, sizeof(board->cap2iface));
-    board->capabilities = 0;
+    board->capabilities &= 1 << TY_BOARD_CAPABILITY_UNIQUE;
 
     ty_list_foreach(cur, &board->interfaces) {
         iface = ty_container_of(cur, ty_board_interface, board_node);
@@ -379,7 +377,7 @@ static int device_callback(hs_device *dev, void *udata)
     return 0;
 }
 
-// FIXME: improve the sequential/parallel API
+// TODO: improve the sequential/parallel API
 int ty_monitor_new(int flags, ty_monitor **rmonitor)
 {
     assert(rmonitor);
@@ -497,6 +495,7 @@ void ty_monitor_stop(ty_monitor *monitor)
         ty_board_unref(board);
     }
     ty_list_init(&monitor->boards);
+    ty_list_init(&monitor->missing_boards);
 
     ty_htable_foreach(cur, &monitor->interfaces) {
         ty_board_interface *iface = ty_container_of(cur, ty_board_interface, monitor_hnode);

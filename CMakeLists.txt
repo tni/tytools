@@ -12,7 +12,7 @@ if(TY_CONFIG_VARIANT)
     if(IS_ABSOLUTE ${TY_CONFIG_VARIANT})
         set(TY_CONFIG_VARIANT_PATH ${TY_CONFIG_VARIANT})
     else()
-        set(TY_CONFIG_VARIANT_PATH "${CMAKE_CURRENT_BINARY_DIR}/variants/${TY_CONFIG_VARIANT}")
+        set(TY_CONFIG_VARIANT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/variants/${TY_CONFIG_VARIANT}")
     endif()
     if(EXISTS "${TY_CONFIG_VARIANT_PATH}/settings.cmake")
         include("${TY_CONFIG_VARIANT_PATH}/settings.cmake")
@@ -27,15 +27,25 @@ set(TY_CONFIG_TYC_EXECUTABLE "tyc" CACHE STRING "Rename tyc executable")
 set(TY_CONFIG_TYC_NAME "tyc" CACHE STRING "Rename tyc application")
 
 set(TY_CONFIG_TYQT_BUILD ON CACHE BOOL "Build TyQt (Teensy GUI manager)")
-set(TY_CONFIG_TYQT_EXECUTABLE "TyQt" CACHE STRING "Rename TyQt executable")
+if(WIN32 OR APPLE)
+    set(TY_CONFIG_TYQT_EXECUTABLE "TyQt" CACHE STRING "Rename TyQt executable")
+else()
+    set(TY_CONFIG_TYQT_EXECUTABLE "tyqt" CACHE STRING "Rename TyQt executable")
+endif()
 set(TY_CONFIG_TYQT_NAME "TyQt" CACHE STRING "Rename TyQt application")
 
 set(TY_CONFIG_UPTY_BUILD ON CACHE BOOL "Build UpTy (Teensy GUI updater)")
-set(TY_CONFIG_UPTY_EXECUTABLE "UpTy" CACHE STRING "Rename UpTy executable")
+if(WIN32 OR APPLE)
+    set(TY_CONFIG_UPTY_EXECUTABLE "UpTy" CACHE STRING "Rename UpTy executable")
+else()
+    set(TY_CONFIG_UPTY_EXECUTABLE "upty" CACHE STRING "Rename UpTy executable")
+endif()
 set(TY_CONFIG_UPTY_NAME "UpTy" CACHE STRING "Rename UpTy application")
 
 set(TY_CONFIG_URL_WEBSITE "https://github.com/Koromix/ty" CACHE STRING "Project website")
 set(TY_CONFIG_URL_BUGS "https://github.com/Koromix/ty/issues" CACHE STRING "Project bug report page")
+
+set(TY_CONFIG_PACKAGE_NAME "TyQt" CACHE STRING "Package / installer name")
 
 if(CMAKE_C_COMPILER_ID MATCHES "[Cc]lang")
     set(CMAKE_COMPILER_IS_CLANG 1)
@@ -102,12 +112,18 @@ elseif(APPLE)
         cmake_policy(SET CMP0042 NEW)
     endif()
 
+    # https://stackoverflow.com/questions/4929255/building-static-libraries-on-mac-using-cmake-and-gcc
+    set(CMAKE_C_ARCHIVE_CREATE "<CMAKE_AR> Scr <TARGET> <LINK_FLAGS> <OBJECTS>")
+    set(CMAKE_CXX_ARCHIVE_CREATE "<CMAKE_AR> Scr <TARGET> <LINK_FLAGS> <OBJECTS>")
+    set(CMAKE_C_ARCHIVE_FINISH "<CMAKE_RANLIB> -no_warning_for_no_symbols -c <TARGET>")
+    set(CMAKE_CXX_ARCHIVE_FINISH "<CMAKE_RANLIB> -no_warning_for_no_symbols -c <TARGET>")
+
     set(CMAKE_INSTALL_NAME_DIR "@rpath")
     set(CMAKE_INSTALL_RPATH "@executable_path;@executable_path/../lib;@executable_path/../libty;@executable_path/../Frameworks")
 endif()
 
 set(TY_CONFIG_VERSION ${TY_CONFIG_VERSION_DEFAULT})
-if(TY_CONFIG_VERSION_AUTO)
+if(TY_CONFIG_VERSION_AUTO AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     find_package(Git)
     if(GIT_FOUND)
         # Recompute the version string after each commit, does not work for tags though
@@ -116,6 +132,7 @@ if(TY_CONFIG_VERSION_AUTO)
         endif()
         execute_process(
             COMMAND ${GIT_EXECUTABLE} describe --tags
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             OUTPUT_VARIABLE TY_CONFIG_VERSION
             OUTPUT_STRIP_TRAILING_WHITESPACE)
         string(SUBSTRING ${TY_CONFIG_VERSION} 1 -1 TY_CONFIG_VERSION)
@@ -139,13 +156,13 @@ if(TY_CONFIG_UPTY_BUILD)
     list(APPEND CPACK_PACKAGE_EXECUTABLES upty "${TY_CONFIG_UPTY_NAME}")
 endif()
 
-if(TY_CONFIG_TYQT_BUILD)
-    set(CPACK_PACKAGE_NAME "${TY_CONFIG_TYQT_EXECUTABLE}")
-elseif(TY_CONFIG_UPTY_BUILD)
-    set(CPACK_PACKAGE_NAME "${TY_CONFIG_UPTY_EXECUTABLE}")
-elseif(TY_CONFIG_TYC_BUILD)
-    set(CPACK_PACKAGE_NAME "${TY_CONFIG_TYC_EXECUTABLE}")
+set(TY_BUILD_TESTS ON CACHE BOOL "Build unit tests and enable CTest")
+if(TY_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests/libty)
 endif()
+
+set(CPACK_PACKAGE_NAME "${TY_CONFIG_PACKAGE_NAME}")
 string(REGEX REPLACE "\\-.*$" "" CPACK_PACKAGE_VERSION "${TY_CONFIG_VERSION}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "${CPACK_PACKAGE_NAME}")
 

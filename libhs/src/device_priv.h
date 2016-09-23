@@ -32,7 +32,7 @@
 struct hs_monitor;
 
 struct _hs_device_vtable {
-    int (*open)(hs_device *dev, hs_handle **rh);
+    int (*open)(hs_device *dev, hs_handle_mode mode, hs_handle **rh);
     void (*close)(hs_handle *h);
 
     hs_descriptor (*get_descriptor)(const hs_handle *h);
@@ -62,9 +62,23 @@ struct hs_device {
 
     uint8_t iface;
 
+    union {
+        struct {
+            uint16_t usage_page;
+            uint16_t usage;
+#ifdef __linux__
+            // Needed to work around a bug on old Linux kernels
+            bool numbered_reports;
+#endif
+        } hid;
+    } u;
+
 };
 
 #define _HS_HANDLE \
-    hs_device *dev;
+    hs_device *dev; \
+    hs_handle_mode mode;
+
+void _hs_device_log(const struct hs_device *dev, const char *verb);
 
 #endif

@@ -95,8 +95,8 @@ public:
 public slots:
     void showLogWindow();
 
-    void reportError(const QString &msg);
-    void reportDebug(const QString &msg);
+    void reportError(const QString &msg, const QString &ctx = QString());
+    void reportDebug(const QString &msg, const QString &ctx = QString());
 
     void setShowTrayIcon(bool show_tray_icon);
     void setHideOnStartup(bool hide_on_startup);
@@ -106,8 +106,8 @@ public slots:
 signals:
     void settingsChanged();
 
-    void globalError(const QString &msg);
-    void globalDebug(const QString &msg);
+    void globalError(const QString &msg, const QString &ctx);
+    void globalDebug(const QString &msg, const QString &ctx);
 
 private:
     void initDatabase(const QString &name, SettingsDatabase &db);
@@ -117,13 +117,11 @@ private:
     void showClientMessage(const QString &msg);
     void showClientError(const QString &msg);
 
-    void executeAction(SessionPeer &peer, const QStringList &arguments);
-
 private slots:
     void trayActivated(QSystemTrayIcon::ActivationReason reason);
 
     void acceptClient();
-    void readAnswer(const QStringList &arguments);
+    void processServerAnswer(const QStringList &arguments);
 };
 
 #endif

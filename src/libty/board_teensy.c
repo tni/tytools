@@ -24,9 +24,12 @@ struct ty_board_model {
     // Upload settings
     unsigned int halfkay_version;
     size_t block_size;
+};
 
-    // Firmware signature
-    uint8_t signature[8];
+struct firmware_signature {
+    uint64_t magic;
+    const ty_board_model *model;
+    unsigned int priority;
 };
 
 #define TEENSY_VID 0x16C0
@@ -58,9 +61,7 @@ static const ty_board_model teensy_pp10_model = {
 
     .code_size = 64512,
     .halfkay_version = 1,
-    .block_size = 256,
-
-    .signature = {0x0C, 0x94, 0x00, 0x7E, 0xFF, 0xCF, 0xF8, 0x94}
+    .block_size = 256
 };
 
 static const ty_board_model teensy_20_model = {
@@ -73,9 +74,7 @@ static const ty_board_model teensy_20_model = {
 
     .code_size = 32256,
     .halfkay_version = 1,
-    .block_size = 128,
-
-    .signature = {0x0C, 0x94, 0x00, 0x3F, 0xFF, 0xCF, 0xF8, 0x94}
+    .block_size = 128
 };
 
 static const ty_board_model teensy_pp20_model = {
@@ -87,9 +86,7 @@ static const ty_board_model teensy_pp20_model = {
 
     .code_size = 130048,
     .halfkay_version = 2,
-    .block_size = 256,
-
-    .signature = {0x0C, 0x94, 0x00, 0xFE, 0xFF, 0xCF, 0xF8, 0x94}
+    .block_size = 256
 };
 
 static const ty_board_model teensy_30_model = {
@@ -101,9 +98,7 @@ static const ty_board_model teensy_30_model = {
 
     .code_size = 131072,
     .halfkay_version = 3,
-    .block_size = 1024,
-
-    .signature = {0x38, 0x80, 0x04, 0x40, 0x82, 0x3F, 0x04, 0x00}
+    .block_size = 1024
 };
 
 static const ty_board_model teensy_31_model = {
@@ -115,9 +110,7 @@ static const ty_board_model teensy_31_model = {
 
     .code_size = 262144,
     .halfkay_version = 3,
-    .block_size = 1024,
-
-    .signature = {0x30, 0x80, 0x04, 0x40, 0x82, 0x3F, 0x04, 0x00}
+    .block_size = 1024
 };
 
 static const ty_board_model teensy_lc_model = {
@@ -129,9 +122,7 @@ static const ty_board_model teensy_lc_model = {
 
     .code_size = 63488,
     .halfkay_version = 3,
-    .block_size = 512,
-
-    .signature = {0x34, 0x80, 0x04, 0x40, 0x82, 0x3F, 0x00, 0x00}
+    .block_size = 512
 };
 
 static const ty_board_model teensy_32_model = {
@@ -143,9 +134,31 @@ static const ty_board_model teensy_32_model = {
 
     .code_size = 262144,
     .halfkay_version = 3,
-    .block_size = 1024,
+    .block_size = 1024
+};
 
-    .signature = {0x30, 0x80, 0x04, 0x40, 0x82, 0x3F, 0x04, 0x00}
+static const ty_board_model teensy_k64_model = {
+    .family = &_ty_teensy_family,
+    .name = "Teensy 3.5",
+    .mcu = "mk64fx512",
+
+    .usage = 0x1F,
+
+    .code_size = 524288,
+    .halfkay_version = 3,
+    .block_size = 1024
+};
+
+static const ty_board_model teensy_k66_model = {
+    .family = &_ty_teensy_family,
+    .name = "Teensy 3.6",
+    .mcu = "mk66fx1m0",
+
+    .usage = 0x22,
+
+    .code_size = 1048576,
+    .halfkay_version = 3,
+    .block_size = 1024
 };
 
 static const ty_board_model *teensy_models[] = {
@@ -156,57 +169,67 @@ static const ty_board_model *teensy_models[] = {
     &teensy_31_model,
     &teensy_lc_model,
     &teensy_32_model,
+    &teensy_k64_model,
+    &teensy_k66_model,
     NULL
 };
 
-static const ty_board_model *identify_model(const hs_hid_descriptor *desc)
+static const struct firmware_signature signatures[] = {
+    {0x0C94007EFFCFF894, &teensy_pp10_model},
+    {0x0C94003FFFCFF894, &teensy_20_model},
+    {0x0C9400FEFFCFF894, &teensy_pp20_model},
+    {0x38800440823F0400, &teensy_30_model},
+    {0x30800440823F0400, &teensy_31_model},
+    {0x34800440823F0000, &teensy_lc_model},
+    {0x30800440823F0400, &teensy_32_model},
+    {0x0100002B88ED00E0, &teensy_k64_model, 1},
+    {0x002008E003000085, &teensy_k66_model, 2}
+};
+
+static const ty_board_model *identify_model(uint16_t usage)
 {
-    if (desc->usage_page != TEENSY_USAGE_PAGE_BOOTLOADER)
-        return NULL;
-
-
     for (const ty_board_model **cur = teensy_models; *cur; cur++) {
         const ty_board_model *model = *cur;
 
-        if (model->usage == desc->usage) {
-            ty_log(TY_LOG_DEBUG, "Identified '%s' with usage value 0x%"PRIx16, model->name,
-                   desc->usage);
+        if (model->usage == usage) {
+            ty_log(TY_LOG_DEBUG, "Identified '%s' with usage value 0x%"PRIx16, model->name, usage);
             return *cur;
         }
     }
 
-    ty_log(TY_LOG_DEBUG, "Unknown Teensy model with usage value 0x%"PRIx16, desc->usage);
+    ty_log(TY_LOG_DEBUG, "Unknown Teensy model with usage value 0x%"PRIx16, usage);
     return NULL;
 }
 
-/* Two quirks have to be accounted when reading the serial number.
-
-   The bootloader returns the serial number as hexadecimal with prefixed zeros
-   (which would suggest octal to stroull).
-
-   In other modes a decimal value is used, but Teensyduino 1.19 added a workaround
-   for a Mac OS X CDC-ADM driver bug: if the number is < 10000000, append a 0.
-   See https://github.com/PaulStoffregen/cores/commit/4d8a62cf65624d2dc1d861748a9bb2e90aaf194d */
 static uint64_t parse_bootloader_serial(const char *s)
 {
     uint64_t serial;
 
-    // Teensy 2.0
+    // This happens for AVR Teensy boards (1.0 and 2.0)
     if (!s)
         return 12345;
 
+    /* The bootloader returns the serial number as hexadecimal with prefixed zeros
+       (which would suggest octal to stroull). */
     serial = strtoull(s, NULL, 16);
-    if (serial < 10000000)
+
+    /* In running modes, a decimal value is used but Teensyduino 1.19 added a workaround for a
+       Mac OS X CDC-ADM driver bug: if the number is < 10000000, append a 0.
+       See https://github.com/PaulStoffregen/cores/commit/4d8a62cf65624d2dc1d861748a9bb2e90aaf194
+
+       It seems beta K66 boards without a programmed S/N report 00000064 (100) as the S/N and we
+       need to ignore this value. */
+    if (serial == 100) {
+        serial = 0;
+    } else if (serial < 10000000) {
         serial *= 10;
+    }
 
     return serial;
 }
 
-static int teensy_open_interface(ty_board_interface *iface)
+static int teensy_load_interface(ty_board_interface *iface)
 {
-    hs_hid_descriptor desc;
-    int r;
-
     if (hs_device_get_vid(iface->dev) != TEENSY_VID)
         return 0;
 
@@ -225,19 +248,8 @@ static int teensy_open_interface(ty_board_interface *iface)
         return 0;
     }
 
-    /* FIXME: do we always need to open? and we may be able to list
-       more devices (at least on Windows) without READ/WRITE rights. */
-    r = ty_board_interface_open(iface);
-    if (r < 0)
-        return r;
-
     switch (hs_device_get_type(iface->dev)) {
     case HS_DEVICE_TYPE_SERIAL:
-        /* Restore sane baudrate, because some systems (such as Linux) may keep tty settings
-           around and reuse them. The device will keep rebooting if 134 is what stays around,
-           so try to break the loop here. */
-        hs_serial_set_attributes(iface->h, 115200, 0);
-
         iface->name = "Serial";
         iface->capabilities |= 1 << TY_BOARD_CAPABILITY_RUN;
         iface->capabilities |= 1 << TY_BOARD_CAPABILITY_SERIAL;
@@ -245,16 +257,10 @@ static int teensy_open_interface(ty_board_interface *iface)
         break;
 
     case HS_DEVICE_TYPE_HID:
-        r = hs_hid_parse_descriptor(iface->h, &desc);
-        if (r < 0) {
-            r = ty_libhs_translate_error(r);
-            goto cleanup;
-        }
-
-        switch (desc.usage_page) {
+        switch (hs_device_get_hid_usage_page(iface->dev)) {
         case TEENSY_USAGE_PAGE_BOOTLOADER:
             iface->name = "HalfKay";
-            iface->model = identify_model(&desc);
+            iface->model = identify_model(hs_device_get_hid_usage(iface->dev));
             if (iface->model) {
                 iface->capabilities |= 1 << TY_BOARD_CAPABILITY_UPLOAD;
                 iface->capabilities |= 1 << TY_BOARD_CAPABILITY_RESET;
@@ -274,8 +280,7 @@ static int teensy_open_interface(ty_board_interface *iface)
             break;
 
         default:
-            r = 0;
-            goto cleanup;
+            return 0;
         }
 
         break;
@@ -285,16 +290,14 @@ static int teensy_open_interface(ty_board_interface *iface)
         iface->model = &teensy_unknown_model;
     iface->vtable = &teensy_vtable;
 
-    r = 1;
-cleanup:
-    ty_board_interface_close(iface);
-    return r;
+    return 1;
 }
 
 static int teensy_update_board(ty_board_interface *iface, ty_board *board)
 {
     const char *serial_string, *product_string;
     uint64_t serial = 0;
+    int r;
 
     serial_string = hs_device_get_serial_number_string(iface->dev);
     product_string = hs_device_get_product_string(iface->dev);
@@ -304,24 +307,8 @@ static int teensy_update_board(ty_board_interface *iface, ty_board *board)
             return 0;
         board->model = iface->model;
 
-        if (serial_string) {
+        if (serial_string)
             serial = parse_bootloader_serial(serial_string);
-
-            if (!board->serial) {
-                board->serial = serial;
-            } else if (serial != board->serial) {
-                /* Let boards using an old Teensyduino (before 1.19) firmware pass with a warning
-                   because there is no way to interpret the serial number correctly, and the board
-                   will show up as a different board if it is first plugged in bootloader mode.
-                   The only way to fix this is to use Teensyduino >= 1.19. */
-                if (serial * 10 == board->serial) {
-                    ty_log(TY_LOG_WARNING, "Upgrade board '%s' to use a recent Teensyduino version",
-                           board->tag);
-                } else {
-                    return 0;
-                }
-            }
-        }
 
         if (!board->description) {
             board->description = strdup("Teensy (HalfKay)");
@@ -332,15 +319,8 @@ static int teensy_update_board(ty_board_interface *iface, ty_board *board)
         if (!board->model)
             board->model = iface->model;
 
-        if (serial_string) {
+        if (serial_string)
             serial = strtoull(serial_string, NULL, 10);
-
-            if (!board->serial) {
-                board->serial = serial;
-            } else if (serial != board->serial) {
-                return 0;
-            }
-        }
 
         free(board->description);
         board->description = strdup(product_string ? product_string : "Teensy");
@@ -348,57 +328,118 @@ static int teensy_update_board(ty_board_interface *iface, ty_board *board)
             return ty_error(TY_ERROR_MEMORY, NULL);
     }
 
-    /* We cannot uniquely identify AVR Teensy boards because the S/N is always 12345,
-       or custom ARM Teensy boards without a valid MAC address. */
-    if (serial && serial != 12345 && serial != UINT32_MAX)
-        iface->capabilities |= 1 << TY_BOARD_CAPABILITY_UNIQUE;
+    if (serial && serial != UINT32_MAX) {
+        if (!board->serial) {
+            board->serial = serial;
+
+            /* Update the board ID with a real serial number */
+            free(board->id);
+            board->id = NULL;
+        } else if (serial != board->serial) {
+            /* Let boards using an old Teensyduino (before 1.19) firmware pass with a warning
+               because there is no way to interpret the serial number correctly, and the board
+               will show up as a different board if it is first plugged in bootloader mode.
+               The only way to fix this is to use Teensyduino >= 1.19. */
+            if (iface->model->code_size && serial * 10 == board->serial) {
+                ty_log(TY_LOG_WARNING, "Upgrade board '%s' to use a recent Teensyduino version",
+                       board->tag);
+            } else {
+                return 0;
+            }
+        }
+
+        /* We cannot uniquely identify AVR Teensy boards because the S/N is always 12345,
+           or custom ARM Teensy boards without a valid MAC address. */
+        if (serial != 12345)
+            iface->capabilities |= 1 << TY_BOARD_CAPABILITY_UNIQUE;
+    }
+
+    if (!board->id) {
+        r = asprintf(&board->id, "%"PRIu64"-%s", serial, iface->model->family->name);
+        if (r < 0) {
+            board->id = NULL;
+            return ty_error(TY_ERROR_MEMORY, NULL);
+        }
+    }
 
     return 1;
 }
 
-// FIXME: don't search beyond code_size, and even less on Teensy 3.0 (size of .startup = 0x400)
+static int change_baudrate(hs_handle *h, unsigned int baudrate)
+{
+    hs_serial_config config = {
+        .baudrate = baudrate
+    };
+    return ty_libhs_translate_error(hs_serial_set_config(h, &config));
+}
+
+int teensy_open_interface(ty_board_interface *iface)
+{
+    int r;
+
+    r = hs_handle_open(iface->dev, HS_HANDLE_MODE_RW, &iface->h);
+    if (r < 0)
+        return ty_libhs_translate_error(r);
+
+    /* Restore sane baudrate, because some systems (such as Linux) may keep tty settings
+       around and reuse them. The device will keep rebooting if 134 is what stays around,
+       so try to break the loop here. */
+    if (hs_device_get_type(iface->dev) == HS_DEVICE_TYPE_SERIAL)
+        change_baudrate(iface->h, 115200);
+
+    return 0;
+}
+
+void teensy_close_interface(ty_board_interface *iface)
+{
+    hs_handle_close(iface->h);
+    iface->h = NULL;
+}
+
+// TODO: don't search beyond code_size, and even less on Teensy 3.0 (size of .startup = 0x400)
 static unsigned int teensy_guess_models(const ty_firmware *fw,
                                         const ty_board_model **rguesses, unsigned int max)
 {
     const uint8_t *image;
     size_t size;
-    unsigned int count = 0;
+    unsigned int priority = 0, count = 0;
 
     image = ty_firmware_get_image(fw);
     size = ty_firmware_get_size(fw);
 
-    if (size < ty_member_sizeof(ty_board_model, signature))
+    if (size < sizeof(uint64_t))
         return 0;
 
     /* Naive search with each board's signature, not pretty but unless
        thousands of models appear this is good enough. */
-    for (size_t i = 0; i < size - ty_member_sizeof(ty_board_model, signature); i++) {
-        for (const ty_board_model **cur = teensy_models; *cur; cur++) {
-            const ty_board_model *model = *cur;
+    for (size_t i = 0; i < size - sizeof(uint64_t); i++) {
+        uint64_t value8 = ((uint64_t)image[i] << 56) |
+                          ((uint64_t)image[i + 1] << 48) |
+                          ((uint64_t)image[i + 2] << 40) |
+                          ((uint64_t)image[i + 3] << 32) |
+                          ((uint64_t)image[i + 4] << 24) |
+                          ((uint64_t)image[i + 5] << 16) |
+                          ((uint64_t)image[i + 6] << 8) |
+                          image[i + 7];
 
-            if (memcmp(image + i, model->signature, ty_member_sizeof(ty_board_model, signature)) == 0) {
-                rguesses[count++] = model;
-                if (count == max)
-                    return count;
+        for (unsigned int j = 0; j < TY_COUNTOF(signatures); j++) {
+            const struct firmware_signature *sig = &signatures[j];
+
+            if (value8 == sig->magic && sig->priority >= priority) {
+                if (sig->priority > priority) {
+                    priority = sig->priority;
+                    count = 0;
+                }
+
+                /* We need to continue, even if we reach max because a higher priority
+                   signature may clear the current guess list. */
+                if (count < max)
+                    rguesses[count++] = sig->model;
             }
         }
     }
 
     return count;
-}
-
-static int teensy_serial_set_attributes(ty_board_interface *iface, uint32_t rate, int flags)
-{
-    int r;
-
-    if (hs_device_get_type(iface->dev) != HS_DEVICE_TYPE_SERIAL)
-        return 0;
-
-    r = hs_serial_set_attributes(iface->h, rate, flags);
-    if (r < 0)
-        return ty_libhs_translate_error(r);
-
-    return 0;
 }
 
 static ssize_t teensy_serial_read(ty_board_interface *iface, char *buf, size_t size, int timeout)
@@ -437,17 +478,23 @@ static ssize_t teensy_serial_write(ty_board_interface *iface, const char *buf, s
 
     switch (hs_device_get_type(iface->dev)) {
     case HS_DEVICE_TYPE_SERIAL:
-        r = hs_serial_write(iface->h, (uint8_t *)buf, (ssize_t)size);
+        r = hs_serial_write(iface->h, (uint8_t *)buf, size, 5000);
         if (r < 0)
             return ty_libhs_translate_error((int)r);
+        if (!r)
+            return ty_error(TY_ERROR_IO, "Timed out while writing to '%s'",
+                            hs_device_get_path(iface->dev));
+
         return r;
 
     case HS_DEVICE_TYPE_HID:
         /* SEREMU expects packets of 32 bytes. The terminating NUL marks the end, so no binary
            transfers. */
         for (size_t i = 0; i < size;) {
+            size_t block_size = TY_MIN(SEREMU_TX_SIZE, size - i);
+
             memset(report, 0, sizeof(report));
-            memcpy(report + 1, buf + i, TY_MIN(SEREMU_TX_SIZE, size - i));
+            memcpy(report + 1, buf + i, block_size);
 
             r = hs_hid_write(iface->h, report, sizeof(report));
             if (r < 0)
@@ -455,8 +502,8 @@ static ssize_t teensy_serial_write(ty_board_interface *iface, const char *buf, s
             if (!r)
                 break;
 
-            i += (size_t)r - 1;
-            total += (size_t)r - 1;
+            i += block_size;
+            total += block_size;
         }
         return (ssize_t)total;
     }
@@ -590,22 +637,20 @@ static int teensy_reset(ty_board_interface *iface)
 
 static int teensy_reboot(ty_board_interface *iface)
 {
-    static unsigned char seremu_magic[] = {0, 0xA9, 0x45, 0xC2, 0x6B};
+    static const unsigned int serial_magic = 134;
+    static const unsigned char seremu_magic[] = {0, 0xA9, 0x45, 0xC2, 0x6B};
 
     int r;
 
     r = TY_ERROR_UNSUPPORTED;
     switch (hs_device_get_type(iface->dev)) {
     case HS_DEVICE_TYPE_SERIAL:
-        r = hs_serial_set_attributes(iface->h, 134, 0);
-        // FIXME: LIBHS ugly construct
-        if (r < 0) {
-            r = ty_libhs_translate_error(r);
-        } else {
+        r = change_baudrate(iface->h, serial_magic);
+        if (!r) {
             /* Don't keep these settings, some systems (such as Linux) may reuse them and
                the device will keep rebooting when opened. */
             ty_error_mask(TY_ERROR_SYSTEM);
-            hs_serial_set_attributes(iface->h, 115200, 0);
+            change_baudrate(iface->h, 115200);
             ty_error_unmask();
         }
         break;
@@ -628,14 +673,16 @@ const ty_board_family _ty_teensy_family = {
     .name = "Teensy",
     .models = teensy_models,
 
-    .open_interface = teensy_open_interface,
+    .load_interface = teensy_load_interface,
     .update_board = teensy_update_board,
 
     .guess_models = teensy_guess_models
 };
 
 static const struct _ty_board_interface_vtable teensy_vtable = {
-    .serial_set_attributes = teensy_serial_set_attributes,
+    .open_interface = teensy_open_interface,
+    .close_interface = teensy_close_interface,
+
     .serial_read = teensy_serial_read,
     .serial_write = teensy_serial_write,
 

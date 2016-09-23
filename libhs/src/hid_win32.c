@@ -26,74 +26,41 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <hidsdi.h>
-#include <hidpi.h>
 #include <winioctl.h>
 #include "device_win32_priv.h"
 #include "hs/hid.h"
 #include "hs/platform.h"
-
-#if defined(__MINGW64_VERSION_MAJOR) && __MINGW64_VERSION_MAJOR < 4
-__declspec(dllimport) BOOLEAN NTAPI HidD_GetPreparsedData(HANDLE HidDeviceObject,
-                                                          PHIDP_PREPARSED_DATA *PreparsedData);
-__declspec(dllimport) BOOLEAN NTAPI HidD_FreePreparsedData(PHIDP_PREPARSED_DATA PreparsedData);
-#endif
 
 // Copied from hidclass.h in the MinGW-w64 headers
 #define HID_OUT_CTL_CODE(id) \
     CTL_CODE(FILE_DEVICE_KEYBOARD, (id), METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 #define IOCTL_HID_GET_FEATURE HID_OUT_CTL_CODE(100)
 
-int hs_hid_parse_descriptor(hs_handle *h, hs_hid_descriptor *rdesc)
-{
-    assert(h);
-    assert(h->dev->type == HS_DEVICE_TYPE_HID);
-    assert(rdesc);
-
-    // semi-hidden Hungarian pointers? Really , Microsoft?
-    PHIDP_PREPARSED_DATA pp;
-    HIDP_CAPS caps;
-    LONG ret;
-
-    ret = HidD_GetPreparsedData(h->handle, &pp);
-    if (!ret)
-        return hs_error(HS_ERROR_SYSTEM, "HidD_GetPreparsedData() failed");
-
-    // NTSTATUS and BOOL are both defined as LONG
-    ret = HidP_GetCaps(pp, &caps);
-    HidD_FreePreparsedData(pp);
-    if (ret != HIDP_STATUS_SUCCESS)
-        return hs_error(HS_ERROR_SYSTEM, "Invalid HID descriptor");
-
-    rdesc->usage_page = caps.UsagePage;
-    rdesc->usage = caps.Usage;
-
-    return 0;
-}
-
 ssize_t hs_hid_read(hs_handle *h, uint8_t *buf, size_t size, int timeout)
 {
     assert(h);
     assert(h->dev->type == HS_DEVICE_TYPE_HID);
+    assert(h->mode & HS_HANDLE_MODE_READ);
     assert(buf);
     assert(size);
 
-    if (h->status < 0) {
+    if (h->read_status < 0) {
         // Could be a transient error, try to restart it
         _hs_win32_start_async_read(h);
-        if (h->status < 0)
-            return h->status;
+        if (h->read_status < 0)
+            return h->read_status;
     }
 
     _hs_win32_finalize_async_read(h, timeout);
-    if (h->status <= 0)
-        return h->status;
+    if (h->read_status <= 0)
+        return h->read_status;
 
     /* HID communication is message-based. So if the caller does not provide a big enough
        buffer, we can just discard the extra data, unlike for serial communication. */
-    if (h->len) {
-        if (size > h->len)
-            size = h->len;
-        memcpy(buf, h->buf, size);
+    if (h->read_len) {
+        if (size > h->read_len)
+            size = h->read_len;
+        memcpy(buf, h->read_buf, size);
     } else {
         size = 0;
     }
@@ -109,32 +76,24 @@ ssize_t hs_hid_write(hs_handle *h, const uint8_t *buf, size_t size)
 {
     assert(h);
     assert(h->dev->type == HS_DEVICE_TYPE_HID);
+    assert(h->mode & HS_HANDLE_MODE_WRITE);
     assert(buf);
 
     if (size < 2)
         return 0;
 
-    OVERLAPPED ov = {0};
-    DWORD len;
-    BOOL success;
+    ssize_t r = _hs_win32_write_sync(h, buf, size, 5000);
+    if (!r)
+        return hs_error(HS_ERROR_IO, "Timed out while writing to '%s'", h->dev->path);
 
-    success = WriteFile(h->handle, buf, (DWORD)size, NULL, &ov);
-    if (!success && GetLastError() != ERROR_IO_PENDING) {
-        CancelIo(h->handle);
-        return hs_error(HS_ERROR_IO, "I/O error while writing to '%s'", h->dev->path);
-    }
-
-    success = GetOverlappedResult(h->handle, &ov, &len, TRUE);
-    if (!success)
-        return hs_error(HS_ERROR_IO, "I/O error while writing to '%s'", h->dev->path);
-
-    return (ssize_t)len;
+    return r;
 }
 
 ssize_t hs_hid_get_feature_report(hs_handle *h, uint8_t report_id, uint8_t *buf, size_t size)
 {
     assert(h);
     assert(h->dev->type == HS_DEVICE_TYPE_HID);
+    assert(h->mode & HS_HANDLE_MODE_READ);
     assert(buf);
     assert(size);
 
@@ -165,6 +124,7 @@ ssize_t hs_hid_send_feature_report(hs_handle *h, const uint8_t *buf, size_t size
 {
     assert(h);
     assert(h->dev->type == HS_DEVICE_TYPE_HID);
+    assert(h->mode & HS_HANDLE_MODE_WRITE);
     assert(buf);
 
     if (size < 2)

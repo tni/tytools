@@ -107,7 +107,6 @@ static inline bool ty_board_has_capability(const ty_board *board, ty_board_capab
 
 TY_PUBLIC int ty_board_wait_for(ty_board *board, ty_board_capability capability, int timeout);
 
-TY_PUBLIC int ty_board_serial_set_attributes(ty_board *board, uint32_t rate, int flags);
 TY_PUBLIC ssize_t ty_board_serial_read(ty_board *board, char *buf, size_t size, int timeout);
 TY_PUBLIC ssize_t ty_board_serial_write(ty_board *board, const char *buf, size_t size);
 
@@ -134,6 +133,8 @@ TY_PUBLIC int ty_upload(ty_board *board, struct ty_firmware **fws, unsigned int 
                          int flags, struct ty_task **rtask);
 TY_PUBLIC int ty_reset(ty_board *board, struct ty_task **rtask);
 TY_PUBLIC int ty_reboot(ty_board *board, struct ty_task **rtask);
+TY_PUBLIC int ty_send(ty_board *board, const char *buf, size_t size, struct ty_task **rtask);
+TY_PUBLIC int ty_send_file(ty_board *board, const char *filename, struct ty_task **rtask);
 
 TY_C_END
 

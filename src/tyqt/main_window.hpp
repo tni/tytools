@@ -9,6 +9,7 @@
 #define MAIN_WINDOW_HH
 
 #include <QHash>
+#include <QProgressBar>
 #include <QStringList>
 
 #include <memory>
@@ -30,20 +31,30 @@ class MainWindow : public QMainWindow, private Ui::MainWindow {
     QMenu *menuUpload;
     QMenu *menuBrowseFirmware;
     QMenu *menuBoardContext;
+    QMenu *menuEnableSerial;
+    QAction *actionClearRecentFirmwares = nullptr;
+    QAction *actionClearSerialHistory = nullptr;
 
 #ifdef __APPLE__
     // See MainWindow::MainWindow() in main_window.cc for more information about that
     QMenu *menuRecentFirmwares2;
     QMenu *menuRecentFirmwares3;
+    QMenu *menuSendHistory2;
+    QMenu *menuSendHistory3;
 #endif
 
-    QMenu *menuMonitorOptions;
-    QAction *actionMonitorEcho;
-    QActionGroup *actionMonitorEOLGroup;
+    QMenu *menuSerialOptions;
+    QMenu *menuBrowseHistory;
+    QAction *actionSerialEcho;
+    QActionGroup *actionSerialEOLGroup;
 
+    bool compact_mode_ = false;
     QComboBox *boardComboBox;
     // We need to keep this around to show/hide the board QComboBox
-    QAction *boardComboAction;
+    QAction *actionBoardComboBox;
+    QProgressBar *statusProgressBar;
+    EnhancedGroupBox *lastOpenOptionBox = nullptr;
+    int saved_splitter_pos_ = 1;
 
     Monitor *monitor_;
     std::vector<std::shared_ptr<Board>> selected_boards_;
@@ -51,6 +62,8 @@ class MainWindow : public QMainWindow, private Ui::MainWindow {
 
     ArduinoDialog *arduino_dialog_ = nullptr;
     AboutDialog *about_dialog_ = nullptr;
+
+    QStringList serial_history_;
 
 public:
     MainWindow(QWidget *parent = nullptr);
@@ -60,10 +73,13 @@ public:
     std::vector<std::shared_ptr<Board>> selectedBoards() const { return selected_boards_; }
     Board *currentBoard() const { return current_board_; }
 
-    bool compactMode() const { return !boardList->isVisible(); }
+    bool compactMode() const { return compact_mode_; }
 
 public slots:
     void showErrorMessage(const QString &msg);
+
+    void selectNextBoard();
+    void selectPreviousBoard();
 
     void uploadToSelection();
     void uploadNewToSelection();
@@ -78,8 +94,10 @@ public slots:
     void openPreferences();
     void openAboutDialog();
 
-    void sendMonitorInput();
-    void clearMonitor();
+    void sendSerialInput();
+    void sendFileToSelection();
+    void clearSerialDocument();
+    void clearSerialHistory();
 
 private:
     static void initCodecList();
@@ -89,6 +107,9 @@ private:
     void updateWindowTitle();
     void updateFirmwareMenus();
 
+    void sendToSelectedBoards(const QString &s);
+    void appendToSerialHistory(const QString &s);
+
     QString browseFirmwareDirectory() const;
     QString browseFirmwareFilter() const;
 
@@ -96,13 +117,16 @@ private slots:
     void selectionChanged(const QItemSelection &selected, const QItemSelection &previous);
     void openBoardListContextMenu(const QPoint &pos);
 
+    void autoFocusBoardWidgets();
+
     void refreshActions();
     void refreshInfo();
     void refreshSettings();
     void refreshInterfaces();
     void refreshStatus();
+    void refreshProgress();
 
-    void openMonitorContextMenu(const QPoint &pos);
+    void openSerialContextMenu(const QPoint &pos);
 
     void validateAndSetFirmwarePath();
     void browseForFirmware();
@@ -111,7 +135,8 @@ private slots:
     void setSerialCodecForSelection(const QString &codec_name);
     void setClearOnResetForSelection(bool clear_on_reset);
     void setScrollBackLimitForSelection(int limit);
-    void setAttachMonitorForSelection(bool attach_monitor);
+    void setEnableSerialForSelection(bool enable);
+    void setSerialLogSizeForSelection(int size);
 };
 
 #endif

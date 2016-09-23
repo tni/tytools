@@ -8,16 +8,14 @@ find_package(EasyQt5)
 set(TYQT_SOURCES about_dialog.cc
                  arduino_dialog.cc
                  arduino_install.cc
-                 commands.cc
+                 client_handler.cc
+                 enhanced_group_box.cc
                  enhanced_plain_text.cc
                  main.cc
                  main_window.cc
                  preferences_dialog.cc
                  selector_dialog.cc
                  tyqt.cc)
-if(MSVC)
-    list(APPEND TYQT_SOURCES "${CMAKE_SOURCE_DIR}/contrib/msvc/getopt.c")
-endif()
 set(TYQT_FORMS about_dialog.ui
                arduino_dialog.ui
                main_window.ui

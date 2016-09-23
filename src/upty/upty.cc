@@ -34,15 +34,14 @@ UpTy::UpTy(int &argc, char *argv[])
     setApplicationName(TY_CONFIG_UPTY_NAME);
     setApplicationVersion(ty_version_string());
 
-    ty_message_redirect([](ty_task *task, ty_message_type type, const void *data, void *udata) {
-        ty_message_default_handler(task, type, data, udata);
+    ty_message_redirect([](const ty_message_data *msg, void *) {
+        ty_message_default_handler(msg, nullptr);
 
-        if (type == TY_MESSAGE_LOG) {
-            auto print = static_cast<const ty_log_message *>(data);
-            if (print->level <= TY_LOG_WARNING) {
-                upTy->reportError(print->msg);
+        if (msg->type == TY_MESSAGE_LOG) {
+            if (msg->u.log.level <= TY_LOG_WARNING) {
+                upTy->reportError(msg->u.log.msg, msg->ctx);
             } else {
-                upTy->reportDebug(print->msg);
+                upTy->reportDebug(msg->u.log.msg, msg->ctx);
             }
         }
     }, nullptr);
@@ -64,14 +63,14 @@ void UpTy::showLogWindow()
     log_dialog_->show();
 }
 
-void UpTy::reportError(const QString &msg)
+void UpTy::reportError(const QString &msg, const QString &ctx)
 {
-    emit globalError(msg);
+    emit globalError(msg, ctx);
 }
 
-void UpTy::reportDebug(const QString &msg)
+void UpTy::reportDebug(const QString &msg, const QString &ctx)
 {
-    emit globalDebug(msg);
+    emit globalDebug(msg, ctx);
 }
 
 int UpTy::exec()
@@ -82,6 +81,8 @@ int UpTy::exec()
 int UpTy::run()
 {
     monitor_.reset(new Monitor());
+    monitor_->setSerialByDefault(false);
+    monitor_->setSerialLogSize(0);
     if (!monitor_->start()) {
         QMessageBox::critical(nullptr, tr("%1 (error)").arg(applicationName()),
                               ty_error_last_message());
@@ -98,11 +99,12 @@ int main(int argc, char *argv[])
 {
     hs_log_set_handler(ty_libhs_log_handler, NULL);
 
-    // FIXME: move to libtyqt function
+    // TODO: move to libtyqt function
     Q_INIT_RESOURCE(libtyqt);
     qRegisterMetaType<ty_log_level>("ty_log_level");
     qRegisterMetaType<std::shared_ptr<void>>("std::shared_ptr<void>");
     qRegisterMetaType<ty_descriptor>("ty_descriptor");
+    qRegisterMetaType<uint64_t>("uint64_t");
 
     UpTy app(argc, argv);
     return app.exec();

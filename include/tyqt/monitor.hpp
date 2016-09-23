@@ -35,6 +35,9 @@ class Monitor : public QAbstractListModel {
     ty_pool *pool_;
     QThread serial_thread_;
 
+    bool default_serial_;
+    size_t serial_log_size_;
+
     std::vector<std::shared_ptr<Board>> boards_;
 
 public:
@@ -43,6 +46,7 @@ public:
 
     enum Column {
         COLUMN_BOARD,
+        COLUMN_MODEL,
         COLUMN_STATUS,
         COLUMN_IDENTITY,
         COLUMN_LOCATION,
@@ -67,6 +71,10 @@ public:
 
     void setMaxTasks(unsigned int max_tasks);
     unsigned int maxTasks() const;
+    void setSerialByDefault(bool default_serial);
+    bool serialByDefault() const { return default_serial_; }
+    void setSerialLogSize(size_t default_size);
+    size_t serialLogSize() const { return serial_log_size_; }
 
     bool start();
     void stop();
@@ -89,7 +97,7 @@ public:
         return boardFromModel(model, model->index(index, 0));
     }
 
-    std::shared_ptr<Board> find(std::function<bool(Board &board)> filter);
+    std::vector<std::shared_ptr<Board>> find(std::function<bool(Board &board)> filter);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;
     int columnCount(const QModelIndex &parent = QModelIndex()) const override;
@@ -116,6 +124,9 @@ private:
 
     void refreshBoardItem(iterator it);
     void removeBoardItem(iterator it);
+
+    void configureBoardDatabase(Board &board);
+    QString findLogFilename(const QString &tpl, unsigned int max);
 };
 
 #endif

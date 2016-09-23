@@ -31,6 +31,17 @@ struct ty_task {
             unsigned int fws_count;
             int flags;
         } upload;
+
+        struct {
+            char *buf;
+            size_t size;
+        } send;
+
+        struct {
+            FILE *fp;
+            size_t size;
+            char *filename;
+        } send_file;
     };
 };
 
@@ -323,6 +334,14 @@ const char *ty_board_get_description(const ty_board *board)
 void ty_board_set_model(ty_board *board, const ty_board_model *model)
 {
     assert(board);
+    assert(board->model);
+
+    if (board->model && board->model->code_size && board->model != model) {
+        ty_log(TY_LOG_WARNING, "Cannot set model '%s' for incompatible board '%s'",
+               model->name, board->tag);
+        return;
+    }
+
     board->model = model;
 }
 
@@ -418,7 +437,7 @@ static int wait_for_callback(ty_monitor *monitor, void *udata)
     return ty_board_has_capability(board, ctx->capability);
 }
 
-// FIXME: this function probably belongs to the monitor API
+// TODO: this function probably belongs to the monitor API
 int ty_board_wait_for(ty_board *board, ty_board_capability capability, int timeout)
 {
     assert(board);
@@ -435,25 +454,6 @@ int ty_board_wait_for(ty_board *board, ty_board_capability capability, int timeo
     ctx.capability = capability;
 
     return ty_monitor_wait(monitor, wait_for_callback, &ctx, timeout);
-}
-
-int ty_board_serial_set_attributes(ty_board *board, uint32_t rate, int flags)
-{
-    assert(board);
-
-    ty_board_interface *iface;
-    int r;
-
-    r = ty_board_open_interface(board, TY_BOARD_CAPABILITY_SERIAL, &iface);
-    if (r < 0)
-        return r;
-    if (!r)
-        return ty_error(TY_ERROR_MODE, "Serial transfer is not available for '%s", board->tag);
-
-    r = (*iface->vtable->serial_set_attributes)(iface, rate, flags);
-
-    ty_board_interface_close(iface);
-    return r;
 }
 
 ssize_t ty_board_serial_read(ty_board *board, char *buf, size_t size, int timeout)
@@ -490,9 +490,6 @@ ssize_t ty_board_serial_write(ty_board *board, const char *buf, size_t size)
         return r;
     if (!r)
         return ty_error(TY_ERROR_MODE, "Serial transfer is not available for '%s", board->tag);
-
-    if (!size)
-        size = strlen(buf);
 
     r = (*iface->vtable->serial_write)(iface, buf, size);
 
@@ -599,11 +596,9 @@ int ty_board_interface_open(ty_board_interface *iface)
     ty_mutex_lock(&iface->open_lock);
 
     if (!iface->h) {
-        r = hs_device_open(iface->dev, &iface->h);
-        if (r < 0) {
-            r = ty_libhs_translate_error(r);
+        r = (*iface->vtable->open_interface)(iface);
+        if (r < 0)
             goto cleanup;
-        }
     }
     iface->open_count++;
 
@@ -621,10 +616,8 @@ void ty_board_interface_close(ty_board_interface *iface)
         return;
 
     ty_mutex_lock(&iface->open_lock);
-    if (!--iface->open_count) {
-        hs_handle_close(iface->h);
-        iface->h = NULL;
-    }
+    if (!--iface->open_count)
+        (*iface->vtable->close_interface)(iface);
     ty_mutex_unlock(&iface->open_lock);
 
     ty_board_interface_unref(iface);
@@ -675,15 +668,19 @@ void ty_board_interface_get_descriptors(const ty_board_interface *iface, struct 
         ty_descriptor_set_add(set, hs_handle_get_descriptor(iface->h), id);
 }
 
-static int new_task(ty_board *board, const struct _ty_task_vtable *vtable, ty_task **rtask)
+static int new_task(ty_board *board, const char *action, const struct _ty_task_vtable *vtable,
+                    ty_task **rtask)
 {
+    char task_name_buf[64];
     ty_task *task = NULL;
     int r;
 
     if (board->current_task)
-        return ty_error(TY_ERROR_BUSY, "Board '%s' is busy with another task", board->tag);
+        return ty_error(TY_ERROR_BUSY, "Board '%s' is busy on task '%s'", board->tag,
+                        ty_task_get_name(board->current_task));
 
-    r = _ty_task_new(sizeof(*task), vtable, &task);
+    snprintf(task_name_buf, sizeof(task_name_buf), "%s@%s", action, board->tag);
+    r = _ty_task_new(task_name_buf, sizeof(*task), vtable, &task);
     if (r < 0)
         return r;
 
@@ -746,7 +743,7 @@ static int upload_progress_callback(const ty_board *board, const ty_firmware *fw
     TY_UNUSED(board);
     TY_UNUSED(udata);
 
-    ty_progress("Uploading", (unsigned int)uploaded, (unsigned int)ty_firmware_get_size(fw));
+    ty_progress("Uploading", uploaded, ty_firmware_get_size(fw));
     return 0;
 }
 
@@ -865,7 +862,7 @@ int ty_upload(ty_board *board, ty_firmware **fws, unsigned int fws_count, int fl
     ty_task *task = NULL;
     int r;
 
-    r = new_task(board, &upload_task_vtable, &task);
+    r = new_task(board, "upload", &upload_task_vtable, &task);
     if (r < 0)
         goto error;
 
@@ -937,7 +934,7 @@ int ty_reset(ty_board *board, ty_task **rtask)
     assert(board);
     assert(rtask);
 
-    return new_task(board, &reset_task_vtable, rtask);
+    return new_task(board, "reset", &reset_task_vtable, rtask);
 }
 
 static int run_reboot(ty_task *task)
@@ -976,5 +973,188 @@ int ty_reboot(ty_board *board, ty_task **rtask)
     assert(board);
     assert(rtask);
 
-    return new_task(board, &reboot_task_vtable, rtask);
+    return new_task(board, "reboot", &reboot_task_vtable, rtask);
+}
+
+static int run_send(ty_task *task)
+{
+    ty_board *board = task->board;
+    const char *buf = task->send.buf;
+    size_t size = task->send.size;
+    size_t written;
+
+    written = 0;
+    while (written < size) {
+        size_t block_size;
+        ssize_t r;
+
+        ty_progress("Sending", written, size);
+
+        block_size = TY_MIN(1024, size - written);
+        r = ty_board_serial_write(board, buf + written, block_size);
+        if (r < 0)
+            return (int)r;
+        written += (size_t)r;
+    }
+
+    return 0;
+}
+
+static void cleanup_send(ty_task *task)
+{
+    free(task->send.buf);
+    cleanup_task(task);
+}
+
+static const struct _ty_task_vtable send_task_vtable = {
+    .run = run_send,
+    .cleanup = cleanup_send
+};
+
+int ty_send(ty_board *board, const char *buf, size_t size, ty_task **rtask)
+{
+    assert(board);
+    assert(buf);
+    assert(rtask);
+
+    ty_task *task = NULL;
+    int r;
+
+    r = new_task(board, "send", &send_task_vtable, &task);
+    if (r < 0)
+        goto error;
+
+    task->send.buf = malloc(size);
+    if (!task->send.buf) {
+        r = ty_error(TY_ERROR_MEMORY, NULL);
+        goto error;
+    }
+    memcpy(task->send.buf, buf, size);
+    task->send.size = size;
+
+    *rtask = task;
+    return 0;
+
+error:
+    ty_task_unref(task);
+    return r;
+}
+
+static int run_send_file(ty_task *task)
+{
+    ty_board *board = task->board;
+    FILE *fp = task->send_file.fp;
+    size_t size = task->send_file.size;
+    const char *filename = task->send_file.filename;
+    size_t written;
+
+    written = 0;
+    while (written < size) {
+        char buf[1024];
+        size_t block_size;
+        size_t block_written;
+
+        ty_progress("Sending", written, size);
+
+        block_size = fread(buf, 1, sizeof(buf), fp);
+        if (!block_size) {
+            if (feof(fp)) {
+                break;
+            } else {
+                return ty_error(TY_ERROR_IO, "I/O error while reading '%s'", filename);
+            }
+        }
+
+        block_written = 0;
+        while (block_written < block_size) {
+            ssize_t r = ty_board_serial_write(board, buf + block_written,
+                                              block_size - block_written);
+            if (r < 0)
+                return (int)r;
+            block_written += (size_t)r;
+        }
+
+        written += block_size;
+    }
+    ty_progress("Sending", size, size);
+
+    return 0;
+}
+
+static void cleanup_send_file(ty_task *task)
+{
+    free(task->send_file.filename);
+    if (task->send_file.fp)
+        fclose(task->send_file.fp);
+    cleanup_task(task);
+}
+
+static const struct _ty_task_vtable send_file_task_vtable = {
+    .run = run_send_file,
+    .cleanup = cleanup_send_file
+};
+
+int ty_send_file(ty_board *board, const char *filename, ty_task **rtask)
+{
+    assert(board);
+    assert(filename);
+    assert(rtask);
+
+    ty_task *task = NULL;
+    int r;
+
+    r = new_task(board, "send", &send_file_task_vtable, &task);
+    if (r < 0)
+        goto error;
+
+#ifdef _WIN32
+    task->send_file.fp = fopen(filename, "rb");
+#else
+    task->send_file.fp = fopen(filename, "rbe");
+#endif
+    if (!task->send_file.fp) {
+        switch (errno) {
+        case EACCES:
+            r = ty_error(TY_ERROR_ACCESS, "Permission denied for '%s'", filename);
+            break;
+        case EIO:
+            r = ty_error(TY_ERROR_IO, "I/O error while opening '%s' for reading", filename);
+            break;
+        case ENOENT:
+        case ENOTDIR:
+            r = ty_error(TY_ERROR_NOT_FOUND, "File '%s' does not exist", filename);
+            break;
+
+        default:
+            r = ty_error(TY_ERROR_SYSTEM, "fopen('%s') failed: %s", filename, strerror(errno));
+            break;
+        }
+        goto error;
+    }
+
+    fseek(task->send_file.fp, 0, SEEK_END);
+#ifdef _WIN32
+    task->send_file.size = (size_t)_ftelli64(task->send_file.fp);
+#else
+    task->send_file.size = (size_t)ftello(task->send_file.fp);
+#endif
+    rewind(task->send_file.fp);
+    if (!task->send_file.size) {
+        r = ty_error(TY_ERROR_UNSUPPORTED, "Failed to read size of '%s', is it a regular file?",
+                     filename);
+        goto error;
+    }
+
+    task->send_file.filename = strdup(filename);
+    if (!task->send_file.filename) {
+        r = ty_error(TY_ERROR_MEMORY, NULL);
+        goto error;
+    }
+
+    *rtask = task;
+    return 0;
+
+error:
+    ty_task_unref(task);
+    return r;
 }

@@ -31,23 +31,15 @@
 
 typedef BOOL WINAPI CancelIoEx_func(HANDLE hFile, LPOVERLAPPED lpOverlapped);
 
-static CancelIoEx_func *CancelIoEx_;
+static BOOL WINAPI CancelIoEx_resolve(HANDLE hFile, LPOVERLAPPED lpOverlapped);
+static CancelIoEx_func *CancelIoEx_ = CancelIoEx_resolve;
 
 #define READ_BUFFER_SIZE 16384
 
-const struct _hs_device_vtable _hs_win32_device_vtable;
-
-_HS_INIT()
-{
-    HMODULE h = LoadLibrary("kernel32.dll");
-    assert(h);
-
-    CancelIoEx_ = (CancelIoEx_func *)GetProcAddress(h, "CancelIoEx");
-}
-
-static int open_win32_device(hs_device *dev, hs_handle **rh)
+static int open_win32_device(hs_device *dev, hs_handle_mode mode, hs_handle **rh)
 {
     hs_handle *h = NULL;
+    DWORD access;
     int r;
 
     h = calloc(1, sizeof(*h));
@@ -56,8 +48,21 @@ static int open_win32_device(hs_device *dev, hs_handle **rh)
         goto error;
     }
     h->dev = hs_device_ref(dev);
+    h->mode = mode;
 
-    h->handle = CreateFile(dev->path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    switch (mode) {
+    case HS_HANDLE_MODE_READ:
+        access = GENERIC_READ;
+        break;
+    case HS_HANDLE_MODE_WRITE:
+        access = GENERIC_WRITE;
+        break;
+    case HS_HANDLE_MODE_RW:
+        access = GENERIC_READ | GENERIC_WRITE;
+        break;
+    }
+
+    h->handle = CreateFile(dev->path, access, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
     if (h->handle == INVALID_HANDLE_VALUE) {
         switch (GetLastError()) {
@@ -81,26 +86,27 @@ static int open_win32_device(hs_device *dev, hs_handle **rh)
         goto error;
     }
 
-    h->ov = calloc(1, sizeof(*h->ov));
-    if (!h->ov) {
-        r = hs_error(HS_ERROR_MEMORY, NULL);
-        goto error;
-    }
-
-    h->ov->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    if (!h->ov->hEvent) {
-        r = hs_error(HS_ERROR_SYSTEM, "CreateEvent() failed: %s", hs_win32_strerror(0));
-        goto error;
-    }
-
-    h->buf = malloc(READ_BUFFER_SIZE);
-    if (!h->buf) {
-        r = hs_error(HS_ERROR_MEMORY, NULL);
-        goto error;
-    }
-
     if (dev->type == HS_DEVICE_TYPE_SERIAL) {
+        DCB dcb;
         COMMTIMEOUTS timeouts;
+        BOOL success;
+
+        dcb.DCBlength = sizeof(dcb);
+        success = GetCommState(h->handle, &dcb);
+        if (!success) {
+            r = hs_error(HS_ERROR_SYSTEM, "GetCommState() failed on '%s': %s", h->dev->path,
+                         hs_win32_strerror(0));
+            goto error;
+        }
+
+        /* Sane config, inspired by libserialport, and with DTR pin on by default for
+           consistency with UNIX platforms. */
+        dcb.fBinary = TRUE;
+        dcb.fAbortOnError = FALSE;
+        dcb.fErrorChar = FALSE;
+        dcb.fNull = FALSE;
+        dcb.fDtrControl = DTR_CONTROL_ENABLE;
+        dcb.fDsrSensitivity = FALSE;
 
         /* See SERIAL_TIMEOUTS documentation on MSDN, this basically means "Terminate read request
            when there is at least one byte available". You still need a total timeout in that mode
@@ -111,15 +117,76 @@ static int open_win32_device(hs_device *dev, hs_handle **rh)
         timeouts.ReadTotalTimeoutConstant = ULONG_MAX - 1;
         timeouts.WriteTotalTimeoutMultiplier = 0;
         timeouts.WriteTotalTimeoutConstant = 5000;
-        SetCommTimeouts(h->handle, &timeouts);
 
-        EscapeCommFunction(h->handle, SETDTR);
+        success = SetCommState(h->handle, &dcb);
+        if (!success) {
+            r = hs_error(HS_ERROR_SYSTEM, "SetCommState() failed on '%s': %s",
+                         h->dev->path, hs_win32_strerror(0));
+            goto error;
+        }
+        success = SetCommTimeouts(h->handle, &timeouts);
+        if (!success) {
+            r = hs_error(HS_ERROR_SYSTEM, "SetCommTimeouts() failed on '%s': %s",
+                         h->dev->path, hs_win32_strerror(0));
+            goto error;
+        }
+        success = PurgeComm(h->handle, PURGE_RXCLEAR);
+        if (!success) {
+            r = hs_error(HS_ERROR_SYSTEM, "PurgeComm(PURGE_RXCLEAR) failed on '%s': %s",
+                         h->dev->path, hs_win32_strerror(0));
+            goto error;
+        }
     }
 
-    _hs_win32_start_async_read(h);
-    if (h->status < 0) {
-        r = h->status;
-        goto error;
+    if (mode & HS_HANDLE_MODE_READ) {
+        h->read_ov = calloc(1, sizeof(*h->read_ov));
+        if (!h->read_ov) {
+            r = hs_error(HS_ERROR_MEMORY, NULL);
+            goto error;
+        }
+
+        h->read_ov->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (!h->read_ov->hEvent) {
+            r = hs_error(HS_ERROR_SYSTEM, "CreateEvent() failed: %s", hs_win32_strerror(0));
+            goto error;
+        }
+
+        h->read_buf = malloc(READ_BUFFER_SIZE);
+        if (!h->read_buf) {
+            r = hs_error(HS_ERROR_MEMORY, NULL);
+            goto error;
+        }
+
+        _hs_win32_start_async_read(h);
+        if (h->read_status < 0) {
+            r = h->read_status;
+            goto error;
+        }
+    }
+
+    if (mode & HS_HANDLE_MODE_WRITE) {
+        h->write_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (!h->write_event) {
+            r = hs_error(HS_ERROR_SYSTEM, "CreateEvent() failed: %s", hs_win32_strerror(0));
+            goto error;
+        }
+
+        /* We need to cancel IO for writes without interfering with pending read requests,
+           we can use CancelIoEx() on Vista or CancelIo() on a duplicate handle on XP. */
+        if ((mode & HS_HANDLE_MODE_READ) && hs_win32_version() < HS_WIN32_VERSION_VISTA) {
+            BOOL success;
+
+            hs_log(HS_LOG_DEBUG, "Using duplicate handle to write to '%s'", dev->path);
+            success = DuplicateHandle(GetCurrentProcess(), h->handle, GetCurrentProcess(),
+                                      &h->write_handle, 0, TRUE, DUPLICATE_SAME_ACCESS);
+            if (!success) {
+                r = hs_error(HS_ERROR_SYSTEM, "DuplicateHandle() failed: %s", hs_win32_strerror(0));
+                h->write_handle = NULL;
+                goto error;
+            }
+        } else {
+            h->write_handle = h->handle;
+        }
     }
 
     *rh = h;
@@ -138,16 +205,22 @@ static unsigned int __stdcall overlapped_cleanup_thread(void *udata)
 
     /* Give up if nothing happens, even if it means a leak; we'll get rid of this when XP
        becomes irrelevant anyway. Hope this happens within my lifetime. */
-    ret = WaitForSingleObject(h->ov->hEvent, 120000);
+    ret = WaitForSingleObject(h->read_ov->hEvent, 120000);
     if (ret != WAIT_OBJECT_0) {
         hs_log(HS_LOG_WARNING, "Cannot stop asynchronous read request, leaking handle");
         return 0;
     }
 
-    h->pending_thread = 0;
+    h->read_pending_thread = 0;
     close_win32_device(h);
 
     return 0;
+}
+
+static BOOL WINAPI CancelIoEx_resolve(HANDLE hFile, LPOVERLAPPED lpOverlapped)
+{
+    CancelIoEx_ = (CancelIoEx_func *)GetProcAddress(LoadLibrary("kernel32.dll"), "CancelIoEx");
+    return CancelIoEx_(hFile, lpOverlapped);
 }
 
 static void close_win32_device(hs_handle *h)
@@ -156,11 +229,13 @@ static void close_win32_device(hs_handle *h)
         hs_device_unref(h->dev);
         h->dev = NULL;
 
-        if (h->pending_thread) {
-            if (CancelIoEx_) {
+        if (h->read_pending_thread) {
+            if (hs_win32_version() >= HS_WIN32_VERSION_VISTA) {
                 CancelIoEx_(h->handle, NULL);
-            } else if (h->pending_thread == GetCurrentThreadId()) {
+                WaitForSingleObject(h->read_ov->hEvent, INFINITE);
+            } else if (h->read_pending_thread == GetCurrentThreadId()) {
                 CancelIo(h->handle);
+                WaitForSingleObject(h->read_ov->hEvent, INFINITE);
             } else {
                 CloseHandle(h->handle);
                 h->handle = NULL;
@@ -178,13 +253,17 @@ static void close_win32_device(hs_handle *h)
             }
         }
 
+        if (h->write_handle && h->write_handle != h->handle)
+            CloseHandle(h->write_handle);
         if (h->handle)
             CloseHandle(h->handle);
 
-        free(h->buf);
-        if (h->ov && h->ov->hEvent)
-            CloseHandle(h->ov->hEvent);
-        free(h->ov);
+        if (h->write_event)
+            CloseHandle(h->write_event);
+        free(h->read_buf);
+        if (h->read_ov && h->read_ov->hEvent)
+            CloseHandle(h->read_ov->hEvent);
+        free(h->read_ov);
     }
 
     free(h);
@@ -192,7 +271,7 @@ static void close_win32_device(hs_handle *h)
 
 static hs_descriptor get_win32_descriptor(const hs_handle *h)
 {
-    return h->ov->hEvent;
+    return h->read_ov->hEvent;
 }
 
 const struct _hs_device_vtable _hs_win32_device_vtable = {
@@ -207,16 +286,16 @@ void _hs_win32_start_async_read(hs_handle *h)
 {
     DWORD ret;
 
-    ret = (DWORD)ReadFile(h->handle, h->buf, READ_BUFFER_SIZE, NULL, h->ov);
+    ret = (DWORD)ReadFile(h->handle, h->read_buf, READ_BUFFER_SIZE, NULL, h->read_ov);
     if (!ret && GetLastError() != ERROR_IO_PENDING) {
         CancelIo(h->handle);
 
-        h->status = hs_error(HS_ERROR_IO, "I/O error while reading from '%s'", h->dev->path);
+        h->read_status = hs_error(HS_ERROR_IO, "I/O error while reading from '%s'", h->dev->path);
         return;
     }
 
-    h->pending_thread = GetCurrentThreadId();
-    h->status = 0;
+    h->read_pending_thread = GetCurrentThreadId();
+    h->read_status = 0;
 }
 
 void _hs_win32_finalize_async_read(hs_handle *h, int timeout)
@@ -224,23 +303,57 @@ void _hs_win32_finalize_async_read(hs_handle *h, int timeout)
     DWORD len, ret;
 
     if (timeout > 0)
-        WaitForSingleObject(h->ov->hEvent, (DWORD)timeout);
+        WaitForSingleObject(h->read_ov->hEvent, (DWORD)timeout);
 
-    ret = (DWORD)GetOverlappedResult(h->handle, h->ov, &len, timeout < 0);
+    ret = (DWORD)GetOverlappedResult(h->handle, h->read_ov, &len, timeout < 0);
     if (!ret) {
         if (GetLastError() == ERROR_IO_INCOMPLETE) {
-            h->status = 0;
+            h->read_status = 0;
             return;
         }
 
-        h->pending_thread = 0;
-        h->status = hs_error(HS_ERROR_IO, "I/O error while reading from '%s'", h->dev->path);
+        h->read_pending_thread = 0;
+        h->read_status = hs_error(HS_ERROR_IO, "I/O error while reading from '%s'", h->dev->path);
         return;
     }
 
-    h->len = (size_t)len;
-    h->ptr = h->buf;
+    h->read_len = (size_t)len;
+    h->read_ptr = h->read_buf;
 
-    h->pending_thread = 0;
-    h->status = 1;
+    h->read_pending_thread = 0;
+    h->read_status = 1;
+}
+
+ssize_t _hs_win32_write_sync(hs_handle *h, const uint8_t *buf, size_t size, int timeout)
+{
+    OVERLAPPED ov = {0};
+    DWORD len;
+    BOOL success;
+
+    ov.hEvent = h->write_event;
+    success = WriteFile(h->write_handle, buf, (DWORD)size, NULL, &ov);
+    if (!success && GetLastError() != ERROR_IO_PENDING)
+        return hs_error(HS_ERROR_IO, "I/O error while writing to '%s'", h->dev->path);
+
+    if (timeout > 0)
+        WaitForSingleObject(ov.hEvent, (DWORD)timeout);
+
+    success = GetOverlappedResult(h->write_handle, &ov, &len, timeout < 0);
+    if (!success) {
+        if (GetLastError() == ERROR_IO_INCOMPLETE) {
+            if (h->write_handle != h->handle) {
+                CancelIo(h->write_handle);
+            } else {
+                CancelIoEx_(h->write_handle, &ov);
+            }
+
+            success = GetOverlappedResult(h->write_handle, &ov, &len, TRUE);
+            if (!success)
+                len = 0;
+        } else {
+            return hs_error(HS_ERROR_IO, "I/O error while writing to '%s'", h->dev->path);
+        }
+    }
+
+    return (ssize_t)len;
 }

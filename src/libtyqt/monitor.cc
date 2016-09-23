@@ -6,6 +6,9 @@
  */
 
 #include <QBrush>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
 #include <QIcon>
 
 #include "tyqt/board.hpp"
@@ -52,8 +55,13 @@ void Monitor::loadSettings()
 #endif
     }
     ty_pool_set_max_threads(pool_, max_tasks);
+    default_serial_ = db_.get("serialByDefault", true).toBool();
+    serial_log_size_ = db_.get("serialLogSize", 20000000ull).toULongLong();
 
     emit settingsChanged();
+
+    for (auto &board: boards_)
+        board->loadSettings(this);
 }
 
 void Monitor::setMaxTasks(unsigned int max_tasks)
@@ -67,6 +75,40 @@ void Monitor::setMaxTasks(unsigned int max_tasks)
 unsigned int Monitor::maxTasks() const
 {
     return ty_pool_get_max_threads(pool_);
+}
+
+void Monitor::setSerialByDefault(bool default_serial)
+{
+    default_serial_ = default_serial;
+
+    for (auto &board: boards_) {
+        auto db = board->database();
+
+        if (!db.get("enableSerial").isValid()) {
+            board->setEnableSerial(default_serial);
+            db.remove("enableSerial");
+        }
+    }
+
+    db_.put("serialByDefault", default_serial);
+    emit settingsChanged();
+}
+
+void Monitor::setSerialLogSize(size_t default_size)
+{
+    serial_log_size_ = default_size;
+
+    for (auto &board: boards_) {
+        auto db = board->database();
+
+        if (!db.get("serialLogSize").isValid()) {
+            board->setSerialLogSize(default_size);
+            db.remove("serialLogSize");
+        }
+    }
+
+    db_.put("serialLogSize", static_cast<qulonglong>(default_size));
+    emit settingsChanged();
 }
 
 bool Monitor::start()
@@ -152,14 +194,18 @@ shared_ptr<Board> Monitor::boardFromModel(const QAbstractItemModel *model,
     return board ? board->shared_from_this() : nullptr;
 }
 
-shared_ptr<Board> Monitor::find(function<bool(Board &board)> filter)
+vector<shared_ptr<Board>> Monitor::find(function<bool(Board &board)> filter)
 {
-    auto board = find_if(boards_.begin(), boards_.end(), [&](shared_ptr<Board> &ptr) { return filter(*ptr); });
+    auto boards = boards_;
 
-    if (board == boards_.end())
-        return nullptr;
+    vector<shared_ptr<Board>> matches;
+    matches.reserve(boards_.size());
+    for (auto &board: boards_) {
+        if (filter(*board))
+            matches.push_back(board);
+    }
 
-    return *board;
+    return matches;
 }
 
 int Monitor::rowCount(const QModelIndex &parent) const
@@ -219,8 +265,6 @@ QVariant Monitor::data(const QModelIndex &index, int role) const
                 return board->statusIcon();
             case Qt::EditRole:
                 return board->tag();
-            case Qt::SizeHintRole:
-                return QSize(0, 24);
         }
     }
 
@@ -228,6 +272,8 @@ QVariant Monitor::data(const QModelIndex &index, int role) const
         switch (index.column()) {
         case COLUMN_BOARD:
             return board->tag();
+        case COLUMN_MODEL:
+            return board->modelName();
         case COLUMN_STATUS:
             return board->statusText();
         case COLUMN_IDENTITY:
@@ -294,38 +340,48 @@ Monitor::iterator Monitor::findBoardIterator(ty_board *board)
 
 void Monitor::handleAddedEvent(ty_board *board)
 {
-    auto ptr = Board::createBoard(board);
+    // Work around the private constructor for make_shared()
+    struct BoardSharedEnabler : public Board {
+        BoardSharedEnabler(ty_board *board)
+            : Board(board) {}
+    };
+    auto board_wrapper_ptr = make_shared<BoardSharedEnabler>(board);
+    auto board_wrapper = board_wrapper_ptr.get();
 
-    if (ptr->hasCapability(TY_BOARD_CAPABILITY_UNIQUE)) {
-        ptr->setDatabase(db_.subDatabase(ptr->id()));
-        ptr->setCache(cache_.subDatabase(ptr->id()));
-        ptr->loadSettings();
-    }
+    if (board_wrapper->hasCapability(TY_BOARD_CAPABILITY_UNIQUE))
+        configureBoardDatabase(*board_wrapper);
+    board_wrapper->loadSettings(this);
 
-    ptr->setThreadPool(pool_);
-    ptr->serial_notifier_.moveToThread(&serial_thread_);
+    board_wrapper->setThreadPool(pool_);
+    board_wrapper->serial_notifier_.moveToThread(&serial_thread_);
 
-    connect(ptr.get(), &Board::infoChanged, this, [=]() {
+    connect(board_wrapper, &Board::infoChanged, this, [=]() {
         refreshBoardItem(findBoardIterator(board));
     });
-    connect(ptr.get(), &Board::interfacesChanged, this, [=]() {
+    // Don't capture board_wrapper_ptr, this should be obvious but I made the mistake once
+    connect(board_wrapper, &Board::interfacesChanged, this, [=]() {
+        if (db_.isValid() && !board_wrapper->database().isValid() &&
+                board_wrapper->hasCapability(TY_BOARD_CAPABILITY_UNIQUE)) {
+            configureBoardDatabase(*board_wrapper);
+            board_wrapper->loadSettings(this);
+        }
         refreshBoardItem(findBoardIterator(board));
     });
-    connect(ptr.get(), &Board::statusChanged, this, [=]() {
+    connect(board_wrapper, &Board::statusChanged, this, [=]() {
         refreshBoardItem(findBoardIterator(board));
     });
-    connect(ptr.get(), &Board::progressChanged, this, [=]() {
+    connect(board_wrapper, &Board::progressChanged, this, [=]() {
         refreshBoardItem(findBoardIterator(board));
     });
-    connect(ptr.get(), &Board::dropped, this, [=]() {
+    connect(board_wrapper, &Board::dropped, this, [=]() {
         removeBoardItem(findBoardIterator(board));
     });
 
     beginInsertRows(QModelIndex(), boards_.size(), boards_.size());
-    boards_.push_back(ptr);
+    boards_.push_back(board_wrapper_ptr);
     endInsertRows();
 
-    emit boardAdded(ptr.get());
+    emit boardAdded(board_wrapper);
 }
 
 void Monitor::handleChangedEvent(ty_board *board)
@@ -349,4 +405,33 @@ void Monitor::removeBoardItem(iterator it)
     beginRemoveRows(QModelIndex(), it - boards_.begin(), it - boards_.begin());
     boards_.erase(it);
     endRemoveRows();
+}
+
+void Monitor::configureBoardDatabase(Board &board)
+{
+    board.setDatabase(db_.subDatabase(board.id()));
+    board.setCache(cache_.subDatabase(board.id()));
+    board.serial_log_file_.setFileName(findLogFilename(board.id(), 3));
+}
+
+QString Monitor::findLogFilename(const QString &id, unsigned int max)
+{
+    QDateTime oldest_mtime;
+    QString oldest_filename;
+
+    auto prefix = QString("%1/%2-%3")
+                  .arg(QDir::tempPath(), QCoreApplication::applicationName(), id);
+    for (unsigned int i = 1; i <= max; i++) {
+        auto filename = QString("%1-%2.txt").arg(prefix).arg(i);
+        QFileInfo info(filename);
+
+        if (!info.exists())
+            return filename;
+        if (oldest_filename.isEmpty() || info.lastModified() < oldest_mtime) {
+            oldest_filename = filename;
+            oldest_mtime = info.lastModified();
+        }
+    }
+
+    return oldest_filename;
 }

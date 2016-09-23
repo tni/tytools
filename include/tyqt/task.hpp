@@ -8,9 +8,9 @@
 #ifndef TASK_HH
 #define TASK_HH
 
-#include <QFuture>
-#include <QFutureInterface>
 #include <QMutex>
+#include <QObject>
+#include <QString>
 
 #include <functional>
 #include <memory>
@@ -20,14 +20,15 @@
 
 class Task : public std::enable_shared_from_this<Task> {
     ty_task_status status_ = TY_TASK_STATUS_READY;
-    unsigned int progress_ = 0, progress_max_ = 0;
+    uint64_t progress_ = 0, progress_max_ = 0;
     bool success_ = false;
     std::shared_ptr<void> result_;
 
-    mutable QFutureInterface<bool> intf_;
-
     QMutex listeners_lock_{QMutex::Recursive};
     std::vector<class TaskListener *> listeners_;
+
+protected:
+    QString name_;
 
 public:
     Task() {}
@@ -40,19 +41,18 @@ public:
 
     virtual bool start() = 0;
 
+    QString name() const { return name_; }
     ty_task_status status() const { return status_; }
-    unsigned int progress() const { return progress_; }
-    unsigned int progressMaximum() const { return progress_max_; }
+    uint64_t progress() const { return progress_; }
+    uint64_t progressMaximum() const { return progress_max_; }
     bool success() const { return success_; }
     std::shared_ptr<void> result() const { return result_; }
-
-    QFuture<bool> future() const { return intf_.future(); }
 
     void reportLog(ty_log_level level, const QString &msg);
     void reportPending();
     void reportStarted();
     void reportFinished(bool success, std::shared_ptr<void> result);
-    void reportProgress(const QString &action, unsigned int value, unsigned int max);
+    void reportProgress(const QString &action, uint64_t value, uint64_t max);
 
     void addListener(TaskListener *listener);
     void removeListener(TaskListener *listener);
@@ -68,10 +68,10 @@ public:
     bool start() override;
 
 private:
-    void notifyMessage(ty_message_type type, const void *data);
-    void notifyLog(const void *data);
-    void notifyStatus(const void *data);
-    void notifyProgress(const void *data);
+    void notifyMessage(const ty_message_data *msg);
+    void notifyLog(const ty_message_data *msg);
+    void notifyStatus(const ty_message_data *msg);
+    void notifyProgress(const ty_message_data *msg);
 };
 
 class ImmediateTask : public Task {
@@ -102,13 +102,12 @@ public:
 
     bool start();
 
+    QString name() const;
     ty_task_status status() const;
-    unsigned int progress() const;
-    unsigned int progressMaximum() const;
+    uint64_t progress() const;
+    uint64_t progressMaximum() const;
     bool success() const;
     std::shared_ptr<void> result() const;
-
-    QFuture<bool> future() const;
 
     friend class TaskListener;
 };
@@ -136,7 +135,7 @@ protected:
     virtual void notifyPending();
     virtual void notifyStarted();
     virtual void notifyFinished(bool success, std::shared_ptr<void> result);
-    virtual void notifyProgress(const QString &action, unsigned int value, unsigned int max);
+    virtual void notifyProgress(const QString &action, uint64_t value, uint64_t max);
 
     friend class Task;
 };
@@ -153,14 +152,14 @@ signals:
     void pending();
     void started();
     void finished(bool success, std::shared_ptr<void> result);
-    void progress(const QString &action, unsigned int value, unsigned int max);
+    void progress(const QString &action, uint64_t value, uint64_t max);
 
 protected:
     void notifyLog(ty_log_level level, const QString &msg) override;
     void notifyPending() override;
     void notifyStarted() override;
     void notifyFinished(bool success, std::shared_ptr<void> result) override;
-    void notifyProgress(const QString &action, unsigned int value, unsigned int max) override;
+    void notifyProgress(const QString &action, uint64_t value, uint64_t max) override;
 };
 
 #endif

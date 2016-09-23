@@ -8,6 +8,7 @@
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QTextCodec>
 #include <QToolButton>
 #include <QUrl>
@@ -16,13 +17,14 @@
 #include "arduino_dialog.hpp"
 #include "tyqt/board.hpp"
 #include "tyqt/board_widget.hpp"
-#include "commands.hpp"
 #include "main_window.hpp"
 #include "tyqt/monitor.hpp"
 #include "preferences_dialog.hpp"
 #include "tyqt.hpp"
 
 using namespace std;
+
+#define MAX_SERIAL_HISTORY 10
 
 QStringList MainWindow::codecs_;
 QHash<QString, int> MainWindow::codec_indexes_;
@@ -39,6 +41,8 @@ MainWindow::MainWindow(QWidget *parent)
        in updateFirmwareMenus(). */
     menuRecentFirmwares2 = new QMenu(menuRecentFirmwares->title(), this);
     menuRecentFirmwares3 = new QMenu(menuRecentFirmwares->title(), this);
+    menuSendHistory2 = new QMenu(menuSendHistory->title(), this);
+    menuSendHistory3 = new QMenu(menuSendHistory->title(), this);
 #endif
 
     menuUpload = new QMenu(this);
@@ -49,6 +53,12 @@ MainWindow::MainWindow(QWidget *parent)
 #else
     menuUpload->addMenu(menuRecentFirmwares);
 #endif
+
+    auto uploadButton = qobject_cast<QToolButton *>(toolBar->widgetForAction(actionUpload));
+    if (uploadButton) {
+        uploadButton->setMenu(menuUpload);
+        uploadButton->setPopupMode(QToolButton::MenuButtonPopup);
+    }
 
     menuBrowseFirmware = new QMenu(this);
 
@@ -65,18 +75,42 @@ MainWindow::MainWindow(QWidget *parent)
     menuBoardContext->addAction(actionReset);
     menuBoardContext->addAction(actionReboot);
     menuBoardContext->addSeparator();
+    menuBoardContext->addAction(actionEnableSerial);
+#ifdef __APPLE__
+    menuBoardContext->addMenu(menuSendHistory2);
+#else
+    menuBoardContext->addMenu(menuSendHistory);
+#endif
+    menuBoardContext->addAction(actionSendFile);
+    menuBoardContext->addAction(actionClearSerial);
+    menuBoardContext->addSeparator();
     menuBoardContext->addAction(actionRenameBoard);
 
-    auto uploadButton = qobject_cast<QToolButton *>(toolBar->widgetForAction(actionUpload));
-    if (uploadButton) {
-        uploadButton->setMenu(menuUpload);
-        uploadButton->setPopupMode(QToolButton::MenuButtonPopup);
+    menuEnableSerial = new QMenu(this);
+#ifdef __APPLE__
+    menuEnableSerial->addMenu(menuSendHistory3);
+#else
+    menuEnableSerial->addMenu(menuSendHistory);
+#endif
+    menuEnableSerial->addAction(actionSendFile);
+    menuEnableSerial->addAction(actionClearSerial);
+
+    auto serialButton = qobject_cast<QToolButton *>(toolBar->widgetForAction(actionEnableSerial));
+    if (serialButton) {
+        serialButton->setMenu(menuEnableSerial);
+        serialButton->setPopupMode(QToolButton::MenuButtonPopup);
     }
 
     /* Only stretch the tab widget when resizing the window, I can't manage to replicate
        this with the Designer alone. */
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
+    splitter->setCollapsible(1, false);
+    connect(splitter, &QSplitter::splitterMoved, this, [=](int pos) {
+        bool collapsed = !pos;
+        if (collapsed != compact_mode_)
+            setCompactMode(collapsed);
+    });
     splitter->setSizes({1, 1});
 
     // We want all action shortcuts to remain available when the menu bar is hidden
@@ -89,12 +123,13 @@ MainWindow::MainWindow(QWidget *parent)
             &MainWindow::dropAssociationForSelection);
     connect(actionReset, &QAction::triggered, this, &MainWindow::resetSelection);
     connect(actionReboot, &QAction::triggered, this, &MainWindow::rebootSelection);
+    connect(actionSendFile, &QAction::triggered, this, &MainWindow::sendFileToSelection);
     connect(actionQuit, &QAction::triggered, tyQt, &TyQt::quit);
 
     // View menu
     connect(actionNewWindow, &QAction::triggered, this, &MainWindow::openCloneWindow);
-    connect(actionMinimalInterface, &QAction::triggered, this, &MainWindow::setCompactMode);
-    connect(actionClearMonitor, &QAction::triggered, this, &MainWindow::clearMonitor);
+    connect(actionCompactMode, &QAction::triggered, this, &MainWindow::setCompactMode);
+    connect(actionClearSerial, &QAction::triggered, this, &MainWindow::clearSerialDocument);
 
     // Tools menu
     connect(actionArduinoTool, &QAction::triggered, this, &MainWindow::openArduinoTool);
@@ -118,6 +153,22 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(actionAbout, &QAction::triggered, this, &MainWindow::openAboutDialog);
 
+    // Ctrl+Tab board nagivation
+    connect(new QShortcut(QKeySequence::NextChild, this),
+            &QShortcut::activated, this, &MainWindow::selectNextBoard);
+    /* Work around broken QKeySequence::PreviousChild, see (old) Qt bug report at
+       https://bugreports.qt.io/browse/QTBUG-15746 */
+    connect(new QShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_Tab, this),
+            &QShortcut::activated, this, &MainWindow::selectPreviousBoard);
+#ifdef _WIN32
+    connect(new QShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_F6, this),
+            &QShortcut::activated, this, &MainWindow::selectPreviousBoard);
+#endif
+#ifdef __APPLE__
+    connect(new QShortcut(Qt::CTRL | Qt::Key_BraceLeft, this),
+            &QShortcut::activated, this, &MainWindow::selectPreviousBoard);
+#endif
+
     // Board list
     boardList->setModel(monitor_);
     boardList->setItemDelegate(new BoardItemDelegate(monitor_));
@@ -130,6 +181,9 @@ MainWindow::MainWindow(QWidget *parent)
         if (monitor_->rowCount() == 1)
             boardList->setCurrentIndex(monitor_->index(0, 0));
     });
+    /* serialEdit->setFocus() is not called in selectionChanged() if the board list
+       has the focus to prevent stealing keyboard focus. We need to do it here. */
+    connect(boardList, &QListView::clicked, this, &MainWindow::autoFocusBoardWidgets);
     // The blue selection frame displayed on OSX looks awful
     boardList->setAttribute(Qt::WA_MacShowFocusRect, false);
     connect(actionRenameBoard, &QAction::triggered, this, [=]() {
@@ -141,60 +195,98 @@ MainWindow::MainWindow(QWidget *parent)
     setTabOrder(boardList, boardComboBox);
     boardComboBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     boardComboBox->setMinimumContentsLength(12);
+    boardComboBox->setFocusPolicy(Qt::TabFocus);
     boardComboBox->setModel(monitor_);
     boardComboBox->setVisible(false);
     auto spacer = new QWidget();
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     toolBar->addWidget(spacer);
 #ifdef __APPLE__
-    boardComboAction = nullptr;
+    actionBoardComboBox = nullptr;
 #else
-    boardComboAction = toolBar->addWidget(boardComboBox);
+    actionBoardComboBox = toolBar->addWidget(boardComboBox);
 #endif
     connect(boardComboBox, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated),
             this, [=](int index) { boardList->setCurrentIndex(monitor_->index(index)); });
 
-    // Monitor tab
-    monitorText->setWordWrapMode(QTextOption::NoWrap);
-    connect(monitorText, &QPlainTextEdit::customContextMenuRequested, this,
-            &MainWindow::openMonitorContextMenu);
-    connect(monitorEdit, &QLineEdit::returnPressed, this, &MainWindow::sendMonitorInput);
-    connect(sendButton, &QToolButton::clicked, this, &MainWindow::sendMonitorInput);
+    // Task progress bar (compact mode)
+    statusProgressBar = new QProgressBar();
+    statusProgressBar->setTextVisible(false);
+    statusProgressBar->setFixedWidth(150);
+    statusbar->addPermanentWidget(statusProgressBar);
+    statusProgressBar->hide();
+
+    // Serial tab
+    connect(tabWidget, &QTabWidget::currentChanged, this, [=]() {
+        // Focus the serial input widget if we can, but don't be a jerk to keyboard users
+        if (!tabWidget->hasFocus())
+            autoFocusBoardWidgets();
+    });
+    serialText->setWordWrapMode(QTextOption::NoWrap);
+    connect(serialText, &QPlainTextEdit::customContextMenuRequested, this,
+            &MainWindow::openSerialContextMenu);
+    connect(serialEdit, &QLineEdit::returnPressed, this, &MainWindow::sendSerialInput);
+    connect(sendButton, &QToolButton::clicked, this, &MainWindow::sendSerialInput);
 
     auto add_eol_action = [=](const QString &title, const QString &eol) {
-        auto action = new QAction(title, actionMonitorEOLGroup);
+        auto action = new QAction(title, actionSerialEOLGroup);
         action->setCheckable(true);
         action->setProperty("EOL", eol);
         return action;
     };
 
-    menuMonitorOptions = new QMenu(this);
-    actionMonitorEOLGroup = new QActionGroup(this);
+    menuSerialOptions = new QMenu(this);
+    menuBrowseHistory = new QMenu(tr("Set &Recent"), this);
+    menuSerialOptions->addMenu(menuBrowseHistory);
+    menuSerialOptions->addAction(actionSendFile);
+    menuSerialOptions->addSeparator();
+    actionSerialEOLGroup = new QActionGroup(this);
     add_eol_action(tr("No line ending"), "");
     add_eol_action(tr("Newline (LF)"), "\n")->setChecked(true);
     add_eol_action(tr("Carriage return (CR)"), "\r");
     add_eol_action(tr("Both (CRLF)"), "\r\n");
-    menuMonitorOptions->addActions(actionMonitorEOLGroup->actions());
-    menuMonitorOptions->addSeparator();
-    actionMonitorEcho = menuMonitorOptions->addAction(tr("Echo"));
-    actionMonitorEcho->setCheckable(true);
-    sendButton->setMenu(menuMonitorOptions);
+    menuSerialOptions->addActions(actionSerialEOLGroup->actions());
+    menuSerialOptions->addSeparator();
+    actionSerialEcho = menuSerialOptions->addAction(tr("Echo"));
+    actionSerialEcho->setCheckable(true);
+    sendButton->setMenu(menuSerialOptions);
 
     // Settings tab
     connect(firmwarePath, &QLineEdit::editingFinished, this, &MainWindow::validateAndSetFirmwarePath);
     connect(firmwareBrowseButton, &QToolButton::clicked, this, &MainWindow::browseForFirmware);
     firmwareBrowseButton->setMenu(menuBrowseFirmware);
-    connect(actionAttachMonitor, &QAction::triggered, this,
-            &MainWindow::setAttachMonitorForSelection);
+    connect(actionEnableSerial, &QAction::triggered, this,
+            &MainWindow::setEnableSerialForSelection);
     connect(resetAfterCheck, &QCheckBox::clicked, this, &MainWindow::setResetAfterForSelection);
     connect(codecComboBox, &QComboBox::currentTextChanged, this, &MainWindow::setSerialCodecForSelection);
     connect(clearOnResetCheck, &QCheckBox::clicked, this, &MainWindow::setClearOnResetForSelection);
     connect(scrollBackLimitSpin, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
             this, &MainWindow::setScrollBackLimitForSelection);
+    connect(serialLogSizeSpin, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
+            this, &MainWindow::setSerialLogSizeForSelection);
 
     initCodecList();
     for (auto codec: codecs_)
         codecComboBox->addItem(codec);
+
+    // Toggle collapsed option groups in Compact Mode
+    for (auto &object: optionsTab->children()) {
+        auto group_box = qobject_cast<EnhancedGroupBox *>(object);
+        if (group_box) {
+            if (!lastOpenOptionBox)
+                lastOpenOptionBox = group_box;
+
+            /* We set StrongFocus in the Designer to put them in the correct tab position. The
+               policy is set to StrongFocus when the group is made collapsible in Compact Mode. */
+            group_box->setFocusPolicy(Qt::NoFocus);
+            connect(group_box, &EnhancedGroupBox::clicked, this, [=](bool checked) {
+                if (checked && group_box != lastOpenOptionBox) {
+                    lastOpenOptionBox->collapse();
+                    lastOpenOptionBox = group_box;
+                }
+            });
+        }
+    }
 
     // TyQt errors
     connect(tyQt, &TyQt::globalError, this, &MainWindow::showErrorMessage);
@@ -221,6 +313,68 @@ void MainWindow::showErrorMessage(const QString &msg)
     statusBar()->showMessage(msg, TY_SHOW_ERROR_TIMEOUT);
 }
 
+void MainWindow::selectNextBoard()
+{
+    if (!monitor_->rowCount())
+        return;
+
+    auto indexes = boardList->selectionModel()->selectedIndexes();
+    qSort(indexes);
+
+    QModelIndex new_index;
+    if (indexes.isEmpty()) {
+        new_index = monitor_->index(0, 0);
+    } else if (indexes.count() == 1) {
+        if (monitor_->rowCount() == 1)
+            return;
+
+        auto row = indexes.first().row();
+        if (row + 1 < monitor_->rowCount()) {
+            new_index = monitor_->index(row + 1, 0);
+        } else {
+            new_index = monitor_->index(0, 0);
+        }
+    } else {
+        new_index = indexes.first();
+    }
+
+    if (new_index.isValid()) {
+        boardList->selectionModel()->select(new_index, QItemSelectionModel::ClearAndSelect);
+        autoFocusBoardWidgets();
+    }
+}
+
+void MainWindow::selectPreviousBoard()
+{
+    if (!monitor_->rowCount())
+        return;
+
+    auto indexes = boardList->selectionModel()->selectedIndexes();
+    qSort(indexes);
+
+    QModelIndex new_index;
+    if (indexes.isEmpty()) {
+        new_index = monitor_->index(monitor_->rowCount() - 1, 0);
+    } else if (indexes.count() == 1) {
+        if (monitor_->rowCount() == 1)
+            return;
+
+        auto row = indexes.first().row();
+        if (row > 0) {
+            new_index = monitor_->index(row - 1, 0);
+        } else {
+            new_index = monitor_->index(monitor_->rowCount() - 1, 0);
+        }
+    } else {
+        new_index = indexes.last();
+    }
+
+    if (new_index.isValid()) {
+        boardList->selectionModel()->select(new_index, QItemSelectionModel::ClearAndSelect);
+        autoFocusBoardWidgets();
+    }
+}
+
 void MainWindow::uploadToSelection()
 {
     if (selected_boards_.empty())
@@ -239,7 +393,7 @@ void MainWindow::uploadToSelection()
         }
     }
     if (!fws_count)
-        tyQt->reportError("No board has a set firmware, try using 'Upload New Firmware'");
+        tyQt->reportError(tr("No board has a set firmware, try using 'Upload New Firmware'"));
 }
 
 void MainWindow::uploadNewToSelection()
@@ -292,24 +446,51 @@ void MainWindow::rebootSelection()
 
 void MainWindow::setCompactMode(bool enable)
 {
-    actionMinimalInterface->setChecked(enable);
+    actionCompactMode->setChecked(enable);
+
+    if (enable == compact_mode_)
+        return;
+    compact_mode_ = enable;
 
     if (enable) {
         menubar->setVisible(false);
         toolBar->setToolButtonStyle(Qt::ToolButtonIconOnly);
 
         bool focus = boardList->hasFocus();
-        if (boardComboAction) {
+        if (actionBoardComboBox) {
             tabWidget->setTabPosition(QTabWidget::West);
-            boardComboAction->setVisible(true);
+            actionBoardComboBox->setVisible(true);
         } else {
             tabWidget->setCornerWidget(boardComboBox, Qt::TopRightCorner);
             boardComboBox->setVisible(true);
         }
 
-        boardList->setVisible(false);
+        if (current_board_ && current_board_->taskStatus() != TY_TASK_STATUS_READY)
+            statusProgressBar->show();
+
+        saved_splitter_pos_ = splitter->sizes().first();
+        if (!saved_splitter_pos_)
+            saved_splitter_pos_ = 1;
+
+        /* Unfortunately, even collapsed the board list still constrains the minimum
+           width of the splitter. This is the simplest jerk-free way I know to work
+           around this behaviour. */
+        int list_width = boardList->minimumSize().width();
+        int splitter_width = splitter->minimumSizeHint().width();
+        splitter->setMinimumWidth(splitter_width - list_width);
+        splitter->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+
+        splitter->setSizes({0, 1});
         if (focus)
             boardComboBox->setFocus(Qt::OtherFocusReason);
+
+        for (auto &object: optionsTab->children()) {
+            auto group_box = qobject_cast<EnhancedGroupBox *>(object);
+            if (group_box) {
+                group_box->setCollapsible(true);
+                group_box->setExpanded(lastOpenOptionBox == group_box);
+            }
+        }
 
         setContextMenuPolicy(Qt::ActionsContextMenu);
     } else {
@@ -317,17 +498,29 @@ void MainWindow::setCompactMode(bool enable)
         toolBar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
 
         bool focus = boardComboBox->hasFocus();
-        if (boardComboAction) {
+        if (actionBoardComboBox) {
             tabWidget->setTabPosition(QTabWidget::North);
-            boardComboAction->setVisible(false);
+            actionBoardComboBox->setVisible(false);
         } else {
             boardComboBox->setVisible(false);
             tabWidget->setCornerWidget(nullptr, Qt::TopRightCorner);
         }
 
-        boardList->setVisible(true);
+        statusProgressBar->hide();
+
+        /* Remove the splitter layout hack used for compact mode. */
+        splitter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        splitter->setMinimumWidth(0);
+
+        splitter->setSizes({saved_splitter_pos_, 1});
         if (focus)
             boardList->setFocus(Qt::OtherFocusReason);
+
+        for (auto &object: optionsTab->children()) {
+            auto group_box = qobject_cast<EnhancedGroupBox *>(object);
+            if (group_box)
+                group_box->setCollapsible(false);
+        }
 
         setContextMenuPolicy(Qt::NoContextMenu);
     }
@@ -339,9 +532,9 @@ void MainWindow::openCloneWindow()
     win->setAttribute(Qt::WA_DeleteOnClose);
 
     win->resize(size());
-    win->setCompactMode(compactMode());
+    win->setCompactMode(compact_mode_);
     win->boardList->selectionModel()->select(boardList->selectionModel()->selection(),
-                                           QItemSelectionModel::SelectCurrent);
+                                             QItemSelectionModel::SelectCurrent);
     win->tabWidget->setCurrentIndex(tabWidget->currentIndex());
 
     win->show();
@@ -384,24 +577,31 @@ void MainWindow::openAboutDialog()
     about_dialog_->show();
 }
 
-void MainWindow::sendMonitorInput()
+void MainWindow::sendSerialInput()
 {
-    auto s = monitorEdit->text();
-    s += actionMonitorEOLGroup->checkedAction()->property("EOL").toString();
-
-    auto echo = actionMonitorEcho->isChecked();
-    for (auto &board: selected_boards_) {
-        if (echo)
-            board->appendToSerialDocument(s);
-        board->sendSerial(s);
-    }
-
-    monitorEdit->clear();
+    sendToSelectedBoards(serialEdit->text());
+    serialEdit->clear();
 }
 
-void MainWindow::clearMonitor()
+void MainWindow::sendFileToSelection()
 {
-    monitorText->clear();
+    if (selected_boards_.empty())
+        return;
+
+    auto filename = QFileDialog::getOpenFileName(this, tr("Send File"));
+    if (filename.isEmpty())
+        return;
+
+    for (auto &board: selected_boards_)
+        board->startSendFile(filename);
+
+    // NOTE: should we echo "@%1" to the serial document too?
+    appendToSerialHistory(QString("@%1").arg(filename));
+}
+
+void MainWindow::clearSerialDocument()
+{
+    serialText->clear();
 }
 
 void MainWindow::initCodecList()
@@ -426,17 +626,16 @@ void MainWindow::initCodecList()
 void MainWindow::enableBoardWidgets()
 {
     infoTab->setEnabled(true);
-    monitorTab->setEnabled(true);
-    actionClearMonitor->setEnabled(true);
-    uploadTab->setEnabled(true);
-    actionAttachMonitor->setEnabled(true);
+    serialTab->setEnabled(true);
+    actionClearSerial->setEnabled(true);
+    optionsTab->setEnabled(true);
+    actionEnableSerial->setEnabled(true);
 
-    monitorText->setDocument(&current_board_->serialDocument());
-    monitorText->moveCursor(QTextCursor::End);
-    monitorText->verticalScrollBar()->setValue(monitorText->verticalScrollBar()->maximum());
+    serialText->setDocument(&current_board_->serialDocument());
+    serialText->moveCursor(QTextCursor::End);
+    serialText->verticalScrollBar()->setValue(serialText->verticalScrollBar()->maximum());
 
     actionRenameBoard->setEnabled(true);
-    ambiguousBoardLabel->setVisible(!current_board_->hasCapability(TY_BOARD_CAPABILITY_UNIQUE));
 }
 
 void MainWindow::disableBoardWidgets()
@@ -450,17 +649,18 @@ void MainWindow::disableBoardWidgets()
     statusText->clear();
     modelText->clear();
     locationText->clear();
-    serialText->clear();
+    serialNumberText->clear();
     descriptionText->clear();
     interfaceTree->clear();
 
-    monitorTab->setEnabled(false);
-    actionClearMonitor->setEnabled(false);
-    uploadTab->setEnabled(false);
-    actionAttachMonitor->setEnabled(false);
+    serialTab->setEnabled(false);
+    actionClearSerial->setEnabled(false);
+    optionsTab->setEnabled(false);
+    actionEnableSerial->setEnabled(false);
+    serialLogFileLabel->clear();
+    ambiguousBoardLabel->setVisible(false);
 
     actionRenameBoard->setEnabled(false);
-    ambiguousBoardLabel->setVisible(false);
 }
 
 void MainWindow::updateWindowTitle()
@@ -499,6 +699,7 @@ void MainWindow::updateFirmwareMenus()
             action = menuRecentFirmwares->addAction(tr("Upload '%1'").arg(QFileInfo(firmware).fileName()));
             connect(action, &QAction::triggered, current_board_,
                     [=]() { current_board_->startUpload(firmware); });
+            action->setEnabled(actionUpload->isEnabled());
             action = menuBrowseFirmware->addAction(tr("Set to '%1'").arg(firmware));
             connect(action, &QAction::triggered, current_board_,
                     [=]() { current_board_->setFirmware(firmware); });
@@ -509,13 +710,18 @@ void MainWindow::updateFirmwareMenus()
         menuRecentFirmwares->setEnabled(true);
         menuBrowseFirmware->setEnabled(true);
 
-        auto action = new QAction(tr("&Clear recent firmwares"), this);
-        connect(action, &QAction::triggered, current_board_, &Board::clearRecentFirmwares);
+        if (!actionClearRecentFirmwares) {
+            actionClearRecentFirmwares = new QAction(tr("&Clear recent firmwares"), this);
+        } else {
+            actionClearRecentFirmwares->disconnect(SIGNAL(triggered()));
+        }
+        connect(actionClearRecentFirmwares, &QAction::triggered, current_board_,
+                &Board::clearRecentFirmwares);
 
         menuRecentFirmwares->addSeparator();
-        menuRecentFirmwares->addAction(action);
+        menuRecentFirmwares->addAction(actionClearRecentFirmwares);
         menuBrowseFirmware->addSeparator();
-        menuBrowseFirmware->addAction(action);
+        menuBrowseFirmware->addAction(actionClearRecentFirmwares);
     } else {
         menuRecentFirmwares->setEnabled(false);
         menuBrowseFirmware->setEnabled(false);
@@ -530,6 +736,95 @@ void MainWindow::updateFirmwareMenus()
     menuRecentFirmwares3->addActions(menuRecentFirmwares->actions());
     menuRecentFirmwares3->setEnabled(menuRecentFirmwares->isEnabled());
 #endif
+}
+
+void MainWindow::sendToSelectedBoards(const QString &s)
+{
+    auto newline = actionSerialEOLGroup->checkedAction()->property("EOL").toString();
+    auto s2 = s + newline;
+
+    if (s.startsWith('@')) {
+        auto filename = s.mid(1);
+        for (auto &board: selected_boards_)
+            board->startSendFile(filename);
+    } else {
+        for (auto &board: selected_boards_)
+            board->startSendSerial(s2);
+    }
+
+    if (actionSerialEcho->isChecked()) {
+        for (auto &board: selected_boards_)
+            board->appendFakeSerialRead(s2);
+    }
+
+    appendToSerialHistory(s);
+}
+
+void MainWindow::appendToSerialHistory(const QString &s)
+{
+    serial_history_.removeAll(s);
+    serial_history_.prepend(s);
+    if (serial_history_.count() > MAX_SERIAL_HISTORY)
+        serial_history_.erase(serial_history_.begin() + MAX_SERIAL_HISTORY, serial_history_.end());
+
+    menuSendHistory->clear();
+    menuBrowseHistory->clear();
+
+    if (!serial_history_.isEmpty()) {
+        for (auto &sent: serial_history_) {
+            QAction *action;
+
+            action = menuSendHistory->addAction(tr("Send '%1'").arg(sent));
+            connect(action, &QAction::triggered, this,
+                    [=]() { sendToSelectedBoards(sent); });
+            action = menuBrowseHistory->addAction(sent);
+            connect(action, &QAction::triggered, serialEdit,
+                    [=]() { serialEdit->setText(sent); });
+        }
+
+        if (!actionClearSerialHistory) {
+            actionClearSerialHistory = new QAction(tr("&Clear serial history"), this);
+            connect(actionClearSerialHistory, &QAction::triggered, this,
+                    &MainWindow::clearSerialHistory);
+        }
+
+        menuSendHistory->addSeparator();
+        menuSendHistory->addAction(actionClearSerialHistory);
+        menuBrowseHistory->addSeparator();
+        menuBrowseHistory->addAction(actionClearSerialHistory);
+
+        menuSendHistory->setEnabled(actionSendFile->isEnabled());
+        menuBrowseHistory->setEnabled(actionSendFile->isEnabled());
+    } else {
+        menuSendHistory->setEnabled(false);
+        menuBrowseHistory->setEnabled(false);
+    }
+
+#ifdef __APPLE__
+    menuSendHistory2->clear();
+    menuSendHistory2->addActions(menuSendHistory->actions());
+    menuSendHistory2->setEnabled(menuSendHistory->isEnabled());
+
+    menuSendHistory3->clear();
+    menuSendHistory3->addActions(menuSendHistory->actions());
+    menuSendHistory3->setEnabled(menuSendHistory->isEnabled());
+#endif
+}
+
+void MainWindow::clearSerialHistory()
+{
+    serial_history_.clear();
+
+    menuSendHistory->clear();
+    menuSendHistory->setEnabled(false);
+#ifdef __APPLE__
+    menuSendHistory2->clear();
+    menuSendHistory2->setEnabled(false);
+    menuSendHistory3->clear();
+    menuSendHistory3->setEnabled(false);
+#endif
+    menuBrowseHistory->clear();
+    menuBrowseHistory->setEnabled(false);
 }
 
 QString MainWindow::browseFirmwareDirectory() const
@@ -563,11 +858,12 @@ void MainWindow::selectionChanged(const QItemSelection &newsel, const QItemSelec
 
     for (auto &board: selected_boards_)
         board->disconnect(this);
-    monitorText->setDocument(nullptr);
+    serialText->setDocument(nullptr);
     selected_boards_.clear();
     current_board_ = nullptr;
 
     auto indexes = boardList->selectionModel()->selectedIndexes();
+    qSort(indexes);
     for (auto &idx: indexes) {
         if (idx.column() == 0)
             selected_boards_.push_back(Monitor::boardFromModel(monitor_, idx));
@@ -586,6 +882,7 @@ void MainWindow::selectionChanged(const QItemSelection &newsel, const QItemSelec
         connect(current_board_, &Board::settingsChanged, this, &MainWindow::refreshSettings);
         connect(current_board_, &Board::interfacesChanged, this, &MainWindow::refreshInterfaces);
         connect(current_board_, &Board::statusChanged, this, &MainWindow::refreshStatus);
+        connect(current_board_, &Board::progressChanged, this, &MainWindow::refreshProgress);
 
         enableBoardWidgets();
         refreshActions();
@@ -593,6 +890,12 @@ void MainWindow::selectionChanged(const QItemSelection &newsel, const QItemSelec
         refreshSettings();
         refreshInterfaces();
         refreshStatus();
+
+        /* Focus the serial input widget if we can, but don't be a jerk. Unfortunately
+           this also prevents proper edit focus when the user clicks a board in the
+           list, we fix that by handling boardList::clicked() in the constructor. */
+        if (!boardList->hasFocus() && !boardComboBox->hasFocus())
+            autoFocusBoardWidgets();
     } else {
         boardComboBox->setCurrentIndex(-1);
 
@@ -616,9 +919,15 @@ void MainWindow::openBoardListContextMenu(const QPoint &pos)
     menuBoardContext->exec(boardList->viewport()->mapToGlobal(pos));
 }
 
+void MainWindow::autoFocusBoardWidgets()
+{
+    if (tabWidget->currentWidget() == serialTab && serialEdit->isEnabled())
+        serialEdit->setFocus();
+}
+
 void MainWindow::refreshActions()
 {
-    bool upload = false, reset = false, reboot = false;
+    bool upload = false, reset = false, reboot = false, send = false;
     for (auto &board: selected_boards_) {
         if (board->taskStatus() != TY_TASK_STATUS_READY)
             continue;
@@ -628,12 +937,25 @@ void MainWindow::refreshActions()
         reset |= board->hasCapability(TY_BOARD_CAPABILITY_RESET) ||
                  board->hasCapability(TY_BOARD_CAPABILITY_REBOOT);
         reboot |= board->hasCapability(TY_BOARD_CAPABILITY_REBOOT);
+        send |= board->serialOpen();
     }
 
     actionUpload->setEnabled(upload);
     actionUploadNew->setEnabled(upload);
     actionReset->setEnabled(reset);
     actionReboot->setEnabled(reboot);
+
+    actionSendFile->setEnabled(send);
+    menuSendHistory->setEnabled(send && !serial_history_.isEmpty());
+#ifdef __APPLE__
+    menuSendHistory2->setEnabled(menuSendHistory->isEnabled());
+    menuSendHistory3->setEnabled(menuSendHistory->isEnabled());
+#endif
+    menuBrowseHistory->setEnabled(send && !serial_history_.isEmpty());
+    bool focus = !serialEdit->isEnabled() && sendButton->hasFocus();
+    serialEdit->setEnabled(send);
+    if (focus)
+        serialEdit->setFocus();
 }
 
 void MainWindow::refreshInfo()
@@ -643,14 +965,21 @@ void MainWindow::refreshInfo()
     idText->setText(current_board_->id());
     modelText->setText(current_board_->modelName());
     locationText->setText(current_board_->location());
-    serialText->setText(QString::number(current_board_->serialNumber()));
+    serialNumberText->setText(QString::number(current_board_->serialNumber()));
     descriptionText->setText(current_board_->description());
 }
 
 void MainWindow::refreshSettings()
 {
-    actionAttachMonitor->setChecked(current_board_->attachMonitor());
-    monitorEdit->setEnabled(current_board_->serialOpen());
+    actionEnableSerial->setChecked(current_board_->enableSerial());
+    serialEdit->setEnabled(current_board_->serialOpen());
+
+    auto log_filename = current_board_->serialLogFilename();
+    if (!log_filename.isEmpty()) {
+        serialLogFileLabel->setText(log_filename);
+    } else {
+        serialLogFileLabel->setText(tr("No serial log available"));
+    }
 
     firmwarePath->setText(current_board_->firmware());
     resetAfterCheck->setChecked(current_board_->resetAfter());
@@ -661,6 +990,9 @@ void MainWindow::refreshSettings()
     scrollBackLimitSpin->blockSignals(true);
     scrollBackLimitSpin->setValue(current_board_->scrollBackLimit());
     scrollBackLimitSpin->blockSignals(false);
+    serialLogSizeSpin->blockSignals(true);
+    serialLogSizeSpin->setValue(current_board_->serialLogSize() / 1000);
+    serialLogSizeSpin->blockSignals(false);
 
     updateFirmwareMenus();
 }
@@ -669,14 +1001,12 @@ void MainWindow::refreshInterfaces()
 {
     interfaceTree->clear();
     for (auto &iface: current_board_->interfaces()) {
-        auto title = tr("%1 %2").arg(iface.name, iface.open ? tr("(open)") : "");
-
         auto item = new QTreeWidgetItem();
-        item->setText(0, title);
+        item->setText(0, iface.name);
         item->setText(1, iface.path);
 
         auto tooltip = tr("%1\n+ Location: %2\n+ Interface Number: %3\n+ Capabilities: %4")
-                       .arg(title).arg(iface.path).arg(iface.number)
+                       .arg(iface.name).arg(iface.path).arg(iface.number)
                        .arg(Board::makeCapabilityList(iface.capabilities).join(", "));
         item->setToolTip(0, tooltip);
         item->setToolTip(1, tooltip);
@@ -684,19 +1014,35 @@ void MainWindow::refreshInterfaces()
         interfaceTree->addTopLevelItem(item);
     }
 
-    monitorEdit->setEnabled(current_board_->serialOpen());
+    ambiguousBoardLabel->setVisible(!current_board_->hasCapability(TY_BOARD_CAPABILITY_UNIQUE));
 }
 
 void MainWindow::refreshStatus()
 {
     statusText->setText(current_board_->statusText());
+
+    if (compact_mode_ && current_board_->taskStatus() != TY_TASK_STATUS_READY) {
+        // Set both to 0 to show busy indicator
+        statusProgressBar->setValue(0);
+        statusProgressBar->setMaximum(0);
+        statusProgressBar->show();
+    } else {
+        statusProgressBar->hide();
+    }
 }
 
-void MainWindow::openMonitorContextMenu(const QPoint &pos)
+void MainWindow::refreshProgress()
 {
-    unique_ptr<QMenu> menu(monitorText->createStandardContextMenu());
-    menu->addAction(actionClearMonitor);
-    menu->exec(monitorText->viewport()->mapToGlobal(pos));
+    auto task = current_board_->task();
+    statusProgressBar->setMaximum(task.progressMaximum());
+    statusProgressBar->setValue(task.progress());
+}
+
+void MainWindow::openSerialContextMenu(const QPoint &pos)
+{
+    unique_ptr<QMenu> menu(serialText->createStandardContextMenu());
+    menu->addAction(actionClearSerial);
+    menu->exec(serialText->viewport()->mapToGlobal(pos));
 }
 
 void MainWindow::validateAndSetFirmwarePath()
@@ -758,8 +1104,14 @@ void MainWindow::setScrollBackLimitForSelection(int limit)
         board->setScrollBackLimit(limit);
 }
 
-void MainWindow::setAttachMonitorForSelection(bool attach_monitor)
+void MainWindow::setEnableSerialForSelection(bool enable)
 {
     for (auto &board: selected_boards_)
-        board->setAttachMonitor(attach_monitor);
+        board->setEnableSerial(enable);
+}
+
+void MainWindow::setSerialLogSizeForSelection(int size)
+{
+    for (auto &board: selected_boards_)
+        board->setSerialLogSize(size * 1000);
 }

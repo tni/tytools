@@ -14,17 +14,17 @@
 #include <QTextCodec>
 #include <QThread>
 
-#include <getopt.h>
 #ifdef _WIN32
     #define WIN32_LEAN_AND_MEAN
     #include <windows.h>
 #endif
 
 #include "arduino_install.hpp"
-#include "commands.hpp"
+#include "client_handler.hpp"
 #include "ty/common.h"
 #include "tyqt/log_dialog.hpp"
 #include "main_window.hpp"
+#include "ty/optline.h"
 #include "tyqt/task.hpp"
 #include "tyqt.hpp"
 
@@ -37,33 +37,16 @@ struct ClientCommand {
     const char *description;
 };
 
-enum {
-    OPTION_HELP = 0x100,
-    OPTION_AUTOSTART,
-    OPTION_USBTYPE
-};
-
 static const ClientCommand commands[] = {
-    {"run",       &TyQt::runMainInstance,      NULL,                      NULL},
-    {"open",      &TyQt::executeRemoteCommand, NULL,                      QT_TR_NOOP("Open a new window (default)")},
-    {"reset",     &TyQt::executeRemoteCommand, NULL,                      QT_TR_NOOP("Reset board")},
-    {"reboot",    &TyQt::executeRemoteCommand, NULL,                      QT_TR_NOOP("Reboot board")},
-    {"upload",    &TyQt::executeRemoteCommand, QT_TR_NOOP("[firmwares]"), QT_TR_NOOP("Upload current or new firmware")},
-    {"integrate", &TyQt::integrateArduino,     NULL,                      NULL},
-    {"restore",   &TyQt::integrateArduino,     NULL,                      NULL},
+    {"run",       &TyQt::runMainInstance,      NULL,                        NULL},
+    {"open",      &TyQt::executeRemoteCommand, NULL,                        QT_TR_NOOP("Open a new window (default)")},
+    {"reset",     &TyQt::executeRemoteCommand, NULL,                        QT_TR_NOOP("Reset board")},
+    {"reboot",    &TyQt::executeRemoteCommand, NULL,                        QT_TR_NOOP("Reboot board")},
+    {"upload",    &TyQt::executeRemoteCommand, QT_TR_NOOP("[<firmwares>]"), QT_TR_NOOP("Upload current or new firmware")},
+    {"integrate", &TyQt::integrateArduino,     NULL,                        NULL},
+    {"restore",   &TyQt::integrateArduino,     NULL,                        NULL},
     // Hidden command for Arduino 1.0.6 integration
-    {"avrdude",   &TyQt::fakeAvrdudeUpload,    NULL,                      NULL},
-    {0}
-};
-
-static const char *short_options = ":qwb:";
-static const struct option long_options[] = {
-    {"help",         no_argument,       NULL, OPTION_HELP},
-    {"quiet",        no_argument,       NULL, 'q'},
-    {"autostart",    no_argument,       NULL, OPTION_AUTOSTART},
-    {"wait",         no_argument,       NULL, 'w'},
-    {"board",        required_argument, NULL, 'b'},
-    {"usbtype",      required_argument, NULL, OPTION_USBTYPE},
+    {"avrdude",   &TyQt::fakeAvrdudeUpload,    NULL,                        NULL},
     {0}
 };
 
@@ -77,15 +60,14 @@ TyQt::TyQt(int &argc, char *argv[])
     setApplicationVersion(ty_version_string());
 
     // This can be triggered from multiple threads, but Qt can queue signals appropriately
-    ty_message_redirect([](ty_task *task, ty_message_type type, const void *data, void *udata) {
-        ty_message_default_handler(task, type, data, udata);
+    ty_message_redirect([](const ty_message_data *msg, void *) {
+        ty_message_default_handler(msg, nullptr);
 
-        if (type == TY_MESSAGE_LOG) {
-            auto print = static_cast<const ty_log_message *>(data);
-            if (print->level <= TY_LOG_WARNING) {
-                tyQt->reportError(print->msg);
+        if (msg->type == TY_MESSAGE_LOG) {
+            if (msg->u.log.level <= TY_LOG_WARNING) {
+                tyQt->reportError(msg->u.log.msg, msg->ctx);
             } else {
-                tyQt->reportDebug(print->msg);
+                tyQt->reportDebug(msg->u.log.msg, msg->ctx);
             }
         }
     }, nullptr);
@@ -153,14 +135,14 @@ void TyQt::showLogWindow()
     log_dialog_->show();
 }
 
-void TyQt::reportError(const QString &msg)
+void TyQt::reportError(const QString &msg, const QString &ctx)
 {
-    emit globalError(msg);
+    emit globalError(msg, ctx);
 }
 
-void TyQt::reportDebug(const QString &msg)
+void TyQt::reportDebug(const QString &msg, const QString &ctx)
 {
-    emit globalDebug(msg);
+    emit globalDebug(msg, ctx);
 }
 
 void TyQt::setVisible(bool visible)
@@ -182,118 +164,6 @@ void TyQt::setVisible(bool visible)
     }
 
     action_visible_->setChecked(visible);
-}
-
-void TyQt::trayActivated(QSystemTrayIcon::ActivationReason reason)
-{
-#ifndef __APPLE__
-    if (reason == QSystemTrayIcon::Trigger)
-        setVisible(!visible());
-#else
-    Q_UNUSED(reason);
-#endif
-}
-
-void TyQt::acceptClient()
-{
-    auto peer = channel_.nextPendingConnection().release();
-
-    connect(peer, &SessionPeer::closed, peer, &SessionPeer::deleteLater);
-    connect(peer, &SessionPeer::received, this, [=](const QStringList &arguments) {
-        executeAction(*peer, arguments);
-    });
-
-#ifdef _WIN32
-    peer->send({"allowsetforegroundwindow", QString::number(GetCurrentProcessId())});
-#endif
-}
-
-void TyQt::executeAction(SessionPeer &peer, const QStringList &arguments)
-{
-    if (arguments.isEmpty()) {
-        peer.send({"log", QString::number(TY_LOG_ERROR), tr("Command not specified")});
-        peer.send({"exit", "1"});
-        return;
-    }
-
-    QStringList parameters = arguments;
-    QString cmd = parameters.takeFirst();
-
-    auto task = Commands::execute(cmd, parameters);
-    auto watcher = new TaskWatcher(&peer);
-
-    connect(watcher, &TaskWatcher::log, &peer, [&peer](int level, const QString &msg) {
-        peer.send({"log", QString::number(level), msg});
-    });
-    connect(watcher, &TaskWatcher::started, &peer, [&peer]() {
-        peer.send("start");
-    });
-    connect(watcher, &TaskWatcher::finished, &peer, [&peer](bool success) {
-        peer.send({"exit", success ? "1" : "0"});
-    });
-    connect(watcher, &TaskWatcher::progress, &peer, [&peer](const QString &action, unsigned int value, unsigned int max) {
-        peer.send({"progress", action, QString::number(value), QString::number(max)});
-    });
-    watcher->setTask(&task);
-
-    task.start();
-}
-
-void TyQt::readAnswer(const QStringList &arguments)
-{
-    QStringList parameters = arguments;
-    QString cmd;
-
-    if (!arguments.count())
-        goto error;
-    cmd = parameters.takeFirst();
-
-    if (cmd == "log") {
-        if (parameters.count() < 2)
-            goto error;
-
-        int level = QString(parameters[0]).toInt();
-        QString msg = parameters[1];
-
-        ty_log(static_cast<ty_log_level>(level), "%s", msg.toLocal8Bit().constData());
-    } else if (cmd == "start") {
-        if (!wait_)
-            exit(0);
-    } else if (cmd == "exit") {
-        exit(parameters.value(0, "0").toInt());
-    } else if (cmd == "progress") {
-        if (parameters.count() < 3)
-            goto error;
-
-        QString action = parameters[0];
-        unsigned int progress = parameters[1].toUInt();
-        unsigned int total = parameters[2].toUInt();
-
-        ty_progress(action.toLocal8Bit().constData(), progress, total);
-#ifdef _WIN32
-    } else if (cmd == "allowsetforegroundwindow") {
-        if (parameters.count() < 1)
-            goto error;
-
-        /* The server may show a window for some commands, such as the board dialog. Executables
-           launched from an application with focus can pop on top, so this instance can probably
-           do it but the TyQt main instance cannot unless we call AllowSetForegroundWindow(). It
-           also works if this instance is run through tyqtc (to provide console I/O) because
-           tyqtc calls AllowSetForegroundWindow() for this process too.
-
-           We could use GetNamedPipeServerProcessId() instead of sending the PID through the
-           channel, but it is not available on XP. */
-        AllowSetForegroundWindow(parameters[0].toUInt());
-#endif
-    } else {
-        goto error;
-    }
-
-    return;
-
-error:
-    showClientError(tr("Received incorrect data from main instance"));
-    exit(1);
 }
 
 void TyQt::setShowTrayIcon(bool show_tray_icon)
@@ -349,9 +219,6 @@ int TyQt::run(int argc, char *argv[])
         }
     }
 
-    // We'll print our own, for consistency
-    opterr = 0;
-
     for (auto cmd = commands; cmd->name; cmd++) {
         if (command_ == cmd->name)
             return (this->*(cmd->f))(argc, argv);
@@ -363,16 +230,20 @@ int TyQt::run(int argc, char *argv[])
 
 int TyQt::runMainInstance(int argc, char *argv[])
 {
-    optind = 0;
-    int c;
-    while ((c = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
-        switch (c) {
-        case OPTION_HELP:
+    ty_optline_context optl;
+    char *opt;
+
+    ty_optline_init_argv(&optl, argc, argv);
+    while ((opt = ty_optline_next_option(&optl))) {
+        QString opt2 = opt;
+        if (opt2 == "--help") {
             showClientMessage(helpText());
             return EXIT_SUCCESS;
-        case 'q':
+        } else if (opt2 == "--quiet" || opt2 == "-q") {
             ty_config_verbosity--;
-            break;
+        } else {
+            showClientError(tr("Unknown option '%1'\n%2").arg(opt2, helpText()));
+            return EXIT_FAILURE;
         }
     }
 
@@ -421,42 +292,48 @@ int TyQt::runMainInstance(int argc, char *argv[])
 
 int TyQt::executeRemoteCommand(int argc, char *argv[])
 {
+    ty_optline_context optl;
+    char *opt;
     bool autostart = false;
-    QString board, usbtype;
+    bool multi = false;
+    QStringList filters;
+    QString usbtype;
 
-    optind = 0;
-    int c;
-    while ((c = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
-        switch (c) {
-        case OPTION_HELP:
+    ty_optline_init_argv(&optl, argc, argv);
+    while ((opt = ty_optline_next_option(&optl))) {
+        QString opt2 = opt;
+        if (opt2 == "--help") {
             showClientMessage(helpText());
             return EXIT_SUCCESS;
-        case 'q':
+        } else if (opt2 == "--quiet" || opt2 == "-q") {
             ty_config_verbosity--;
-            break;
-
-        case OPTION_AUTOSTART:
+        } else if (opt2 == "--autostart") {
             autostart = true;
-            break;
-        case 'w':
+        } else if (opt2 == "--wait" || opt2 == "-w") {
             wait_ = true;
-            break;
-        case 'b':
-            board = optarg;
-            break;
-        /* Hidden option to improve the Arduino integration. Basically, if mode is set and does
-           not contain "_SERIAL", --board is ignored. This way the IDE serial port selection
-           is ignored when uploading to a non-serial board. */
-        case OPTION_USBTYPE:
-            usbtype = optarg;
-            break;
+        } else if (opt2 == "--multi" || opt2 == "-m") {
+            multi = true;
+        } else if (opt2 == "--board" || opt2 == "-B") {
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                showClientError(tr("Option '--board' takes an argument\n%1").arg(helpText()));
+                return EXIT_FAILURE;
+            }
 
-        case ':':
-            showClientError(tr("Option '%1' takes an argument\n%2").arg(argv[optind - 1])
-                                                                   .arg(helpText()));
-            return EXIT_FAILURE;
-        case '?':
-            showClientError(tr("Unknown option '%1'\n%2").arg(argv[optind - 1]).arg(helpText()));
+            filters.append(value);
+        } else if (opt2 == "--usbtype") {
+            /* Hidden option to improve the Arduino integration. Basically, if mode is set and
+               does not contain "_SERIAL", --board is ignored. This way the IDE serial port
+               selection is ignored when uploading to a non-serial board. */
+            char *value = ty_optline_get_value(&optl);
+            if (!value) {
+                showClientError(tr("Option '--usbtype' takes an argument\n%1").arg(helpText()));
+                return EXIT_FAILURE;
+            }
+
+            usbtype = value;
+        } else {
+            showClientError(tr("Unknown option '%1'\n%2").arg(opt2, helpText()));
             return EXIT_FAILURE;
         }
     }
@@ -483,16 +360,21 @@ int TyQt::executeRemoteCommand(int argc, char *argv[])
         }
     }
 
-    connect(client.get(), &SessionPeer::received, this, &TyQt::readAnswer);
+    connect(client.get(), &SessionPeer::received, this, &TyQt::processServerAnswer);
 
-    // Hack for Arduino integration, see getopt loop in TyQt::run()
+    // Hack for Arduino integration, see option loop above
     if (!usbtype.isEmpty() && !usbtype.contains("_SERIAL"))
-        board = "";
+        filters.clear();
 
-    QStringList arguments = {command_, QDir::currentPath(), board};
-    for (int i = optind; i < argc; i++)
-        arguments.append(argv[i]);
-    client->send(arguments);
+    client->send({"workdir", QDir::currentPath()});
+    if (multi)
+        client->send({"multi"});
+    if (!filters.isEmpty())
+        client->send(QStringList{"select"} + filters);
+    QStringList command_arglist = {command_};
+    while ((opt = ty_optline_consume_non_option(&optl)))
+        command_arglist.append(opt);
+    client->send(command_arglist);
 
     connect(client.get(), &SessionPeer::closed, this, [=](SessionPeer::CloseReason reason) {
         if (reason != SessionPeer::LocalClose) {
@@ -530,24 +412,25 @@ int TyQt::integrateArduino(int argc, char *argv[])
 
 int TyQt::fakeAvrdudeUpload(int argc, char *argv[])
 {
+    ty_optline_context optl;
+    char *opt;
     QString upload;
     bool verbose = false;
 
-    optind = 0;
-    int c;
-    /* Ignore most switches, we need to pass the ones taking an argument to getopt() or
-       their arguments will be treated as concatenated single-character switches. */
-    while ((c = getopt(argc, argv, "U:vp:b:B:c:C:E:i:P:x:")) != -1) {
-        switch (c) {
-        case 'U':
-            upload = optarg;
-            break;
-        case 'v':
+    ty_optline_init_argv(&optl, argc, argv);
+    while ((opt = ty_optline_next_option(&optl))) {
+        QString opt2 = opt;
+        if (opt2 == "-U") {
+            upload = ty_optline_get_value(&optl);
+        } else if (opt2 == "-v") {
             verbose = true;
-            break;
+        /* Ignore most switches, we need to get the value of the ones taking an argument
+           or they will treated as concatenated single-character switches. */
+        } else if (opt2 == "-p" || opt2 == "-b" || opt2 == "-B" || opt2 == "-c" || opt2 == "-C" ||
+                   opt2 == "-E" || opt2 == "-i" || opt2 == "-P" || opt2 == "-x") {
+            ty_optline_get_value(&optl);
         }
     }
-
 
     /* The only avrdude operation we support is -Uflash:w:filename[:format] (format is ignored)
        and of course filename can contain colons (the Windows drive separator, for example). */
@@ -568,6 +451,7 @@ int TyQt::fakeAvrdudeUpload(int argc, char *argv[])
     fake_argv[fake_argc++] = argv[0];
     fake_argv[fake_argc++] = "--autostart";
     fake_argv[fake_argc++] = "--wait";
+    fake_argv[fake_argc++] = "--multi";
     if (!verbose)
         fake_argv[fake_argc++] = "--quiet";
     auto filename = upload.toLocal8Bit();
@@ -579,8 +463,8 @@ int TyQt::fakeAvrdudeUpload(int argc, char *argv[])
 void TyQt::resetMonitor()
 {
     monitor_cache_.clear();
-    monitor_.loadSettings();
     monitor_.stop();
+    monitor_.loadSettings();
     monitor_.start();
 }
 
@@ -591,8 +475,8 @@ void TyQt::clearSettingsAndReset()
 
     monitor_db_.clear();
     monitor_cache_.clear();
-    monitor_.loadSettings();
     monitor_.stop();
+    monitor_.loadSettings();
     monitor_.start();
 }
 
@@ -644,10 +528,13 @@ QString TyQt::helpText()
     QString help = tr("usage: %1 <command> [options]\n\n"
                       "General options:\n"
                       "       --help               Show help message\n"
-                      "       --version            Display version information\n\n"
-                      "   -w, --wait               Wait until task completion\n"
-                      "   -b, --board <tag>        Work with board <tag> instead of first detected\n"
+                      "       --version            Display version information\n"
                       "   -q, --quiet              Disable output, use -qqq to silence errors\n\n"
+                      "Client options:\n"
+                      "       --autostart          Start main instance if it is not available\n"
+                      "   -w, --wait               Wait until full completion\n"
+                      "   -B, --board <tag>        Work with board <tag> instead of first detected\n"
+                      "   -m, --multi              Select all matching boards (first match by default)\n\n"
                       "Commands:\n").arg(QFileInfo(QApplication::applicationFilePath()).fileName());
 
     for (auto cmd = commands; cmd->name; cmd++) {
@@ -667,7 +554,7 @@ QString TyQt::helpText()
 void TyQt::showClientMessage(const QString &msg)
 {
     if (client_console_) {
-        printf("%s\n", qPrintable(msg));
+        printf("%s\n", msg.toLocal8Bit().constData());
     } else {
         QMessageBox::information(nullptr, QApplication::applicationName(), msg);
     }
@@ -676,8 +563,98 @@ void TyQt::showClientMessage(const QString &msg)
 void TyQt::showClientError(const QString &msg)
 {
     if (client_console_) {
-        fprintf(stderr, "%s\n", qPrintable(msg));
+        fprintf(stderr, "%s\n", msg.toLocal8Bit().constData());
     } else {
         QMessageBox::critical(nullptr, tr("%1 (error)").arg(QApplication::applicationName()), msg);
     }
+}
+
+void TyQt::trayActivated(QSystemTrayIcon::ActivationReason reason)
+{
+#ifndef __APPLE__
+    if (reason == QSystemTrayIcon::Trigger)
+        setVisible(!visible());
+#else
+    Q_UNUSED(reason);
+#endif
+}
+
+void TyQt::acceptClient()
+{
+    auto peer = channel_.nextPendingConnection();
+    auto client = new ClientHandler(move(peer), this);
+    connect(client, &ClientHandler::closed, client, &ClientHandler::deleteLater);
+}
+
+void TyQt::processServerAnswer(const QStringList &arguments)
+{
+    QStringList parameters = arguments;
+    QString cmd;
+
+    if (!arguments.count())
+        goto error;
+    cmd = parameters.takeFirst();
+
+    if (cmd == "log") {
+        if (parameters.count() < 2)
+            goto error;
+
+        ty_message_data msg = {};
+        QByteArray ctx_buf;
+        if (!parameters[0].isEmpty()) {
+            ctx_buf = parameters[0].toLocal8Bit();
+            msg.ctx = ctx_buf.constData();
+        }
+        msg.type = TY_MESSAGE_LOG;
+        msg.u.log.level = static_cast<ty_log_level>(QString(parameters[1]).toInt());
+        QByteArray msg_buf = parameters[2].toLocal8Bit();
+        msg.u.log.msg = msg_buf.constData();
+
+        ty_message(&msg);
+    } else if (cmd == "progress") {
+        if (parameters.count() < 3)
+            goto error;
+
+        ty_message_data msg = {};
+        QByteArray ctx_buf;
+        if (!parameters[0].isEmpty()) {
+            ctx_buf = parameters[0].toLocal8Bit();
+            msg.ctx = ctx_buf.constData();
+        }
+        msg.type = TY_MESSAGE_PROGRESS;
+        QByteArray action_buf = parameters[1].toLocal8Bit();
+        msg.u.progress.action = action_buf.constData();
+        msg.u.progress.value = parameters[2].toULongLong();
+        msg.u.progress.max = parameters[3].toULongLong();
+
+        ty_message(&msg);
+    } else if (cmd == "start") {
+        if (!wait_)
+            exit(0);
+    } else if (cmd == "exit") {
+        exit(parameters.value(0, "0").toInt());
+#ifdef _WIN32
+    } else if (cmd == "allowsetforegroundwindow") {
+        if (parameters.count() < 1)
+            goto error;
+
+        /* The server may show a window for some commands, such as the board dialog. Executables
+           launched from an application with focus can pop on top, so this instance can probably
+           do it but the TyQt main instance cannot unless we call AllowSetForegroundWindow(). It
+           also works if this instance is run through tyqtc (to provide console I/O) because
+           tyqtc calls AllowSetForegroundWindow() for this process too.
+
+           We could use GetNamedPipeServerProcessId() instead of sending the PID through the
+           channel, but it is not available on XP. */
+        AllowSetForegroundWindow(parameters[0].toUInt());
+#endif
+    } else {
+        goto error;
+    }
+
+    return;
+
+error:
+    showClientError(tr("Received incorrect data from main instance"));
+    exit(1);
 }

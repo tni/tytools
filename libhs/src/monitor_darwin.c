@@ -69,6 +69,12 @@ struct usb_controller {
     io_string_t path;
 };
 
+struct service_aggregate {
+    io_service_t dev_service;
+    io_service_t iface_service;
+    io_service_t usb_service;
+};
+
 extern const struct _hs_device_vtable _hs_posix_device_vtable;
 extern const struct _hs_device_vtable _hs_darwin_hid_vtable;
 
@@ -156,15 +162,17 @@ static int get_ioregistry_entry_path(io_service_t service, char **rpath)
     kern_return_t kret;
 
     kret = IORegistryEntryGetPath(service, kIOServicePlane, buf);
-    if (kret != kIOReturnSuccess)
-        return hs_error(HS_ERROR_SYSTEM, "IORegistryEntryGetPath() failed");
+    if (kret != kIOReturnSuccess) {
+        hs_log(HS_LOG_DEBUG, "IORegistryEntryGetPath() failed with code %d", kret);
+        return 0;
+    }
 
     path = strdup(buf);
     if (!path)
         return hs_error(HS_ERROR_MEMORY, NULL);
 
     *rpath = path;
-    return 0;
+    return 1;
 }
 
 static void clear_iterator(io_iterator_t it)
@@ -174,24 +182,22 @@ static void clear_iterator(io_iterator_t it)
         IOObjectRelease(object);
 }
 
-static int find_device_node(hs_device *dev, io_service_t service)
+static int find_device_node(struct service_aggregate *agg, hs_device *dev)
 {
     int r;
 
-    if (IOObjectConformsTo(service, "IOSerialBSDClient")) {
+    if (IOObjectConformsTo(agg->dev_service, "IOSerialBSDClient")) {
         dev->type = HS_DEVICE_TYPE_SERIAL;
         dev->vtable = &_hs_posix_device_vtable;
 
-        r = get_ioregistry_value_string(service, CFSTR("IOCalloutDevice"), &dev->path);
+        r = get_ioregistry_value_string(agg->dev_service, CFSTR("IOCalloutDevice"), &dev->path);
         if (!r)
             hs_log(HS_LOG_WARNING, "Serial device does not have property 'IOCalloutDevice'");
-    } else if (IOObjectConformsTo(service, "IOHIDDevice")) {
+    } else if (IOObjectConformsTo(agg->dev_service, "IOHIDDevice")) {
         dev->type = HS_DEVICE_TYPE_HID;
         dev->vtable = &_hs_darwin_hid_vtable;
 
-        r = get_ioregistry_entry_path(service, &dev->path);
-        if (!r)
-            r = 1;
+        r = get_ioregistry_entry_path(agg->dev_service, &dev->path);
     } else {
         hs_log(HS_LOG_WARNING, "Cannot find device node for unknown device entry class");
         r = 0;
@@ -244,14 +250,15 @@ static io_service_t get_parent_and_release(io_service_t service, const io_name_t
     return parent;
 }
 
-static int resolve_device_location(io_service_t service, char **rlocation)
+static int resolve_device_location(io_service_t usb_service, char **rlocation)
 {
     uint32_t location_id;
     uint8_t ports[16];
     unsigned int depth;
     int r;
 
-    r = get_ioregistry_value_number(service, CFSTR("locationID"), kCFNumberSInt32Type, &location_id);
+    r = get_ioregistry_value_number(usb_service, CFSTR("locationID"), kCFNumberSInt32Type,
+                                    &location_id);
     if (!r) {
         hs_log(HS_LOG_WARNING, "Ignoring device without 'locationID' property");
         return 0;
@@ -278,20 +285,65 @@ static io_service_t find_conforming_parent(io_service_t service, const char *cls
     return service;
 }
 
-static int process_darwin_device(io_service_t service, hs_device **rdev)
+static int fill_device_details(struct service_aggregate *agg, hs_device *dev)
 {
-    io_service_t dev_service = 0, iface_service = 0;
-    hs_device *dev = NULL;
     uint64_t session;
     int r;
 
-    iface_service = find_conforming_parent(service, "IOUSBInterface");
-    if (!iface_service) {
-        r = 0;
-        goto cleanup;
-    }
-    dev_service = find_conforming_parent(iface_service, "IOUSBDevice");
-    if (!dev_service) {
+#define GET_MANDATORY_PROPERTY_NUMBER(service, key, type, var) \
+        r = get_ioregistry_value_number((service), CFSTR(key), (type), (var)); \
+        if (!r) { \
+            hs_log(HS_LOG_WARNING, "Missing property '%s', ignoring device", (key)); \
+            return 0; \
+        }
+#define GET_OPTIONAL_PROPERTY_STRING(service, key, var) \
+        r = get_ioregistry_value_string((service), CFSTR(key), (var)); \
+        if (r < 0) \
+            return r;
+
+    GET_MANDATORY_PROPERTY_NUMBER(agg->usb_service, "sessionID", kCFNumberSInt64Type, &session);
+    GET_MANDATORY_PROPERTY_NUMBER(agg->usb_service, "idVendor", kCFNumberSInt64Type, &dev->vid);
+    GET_MANDATORY_PROPERTY_NUMBER(agg->usb_service, "idProduct", kCFNumberSInt64Type, &dev->pid);
+    GET_MANDATORY_PROPERTY_NUMBER(agg->iface_service, "bInterfaceNumber", kCFNumberSInt64Type,
+                                  &dev->iface);
+
+    GET_OPTIONAL_PROPERTY_STRING(agg->usb_service, "USB Vendor Name", &dev->manufacturer);
+    GET_OPTIONAL_PROPERTY_STRING(agg->usb_service, "USB Product Name", &dev->product);
+    GET_OPTIONAL_PROPERTY_STRING(agg->usb_service, "USB Serial Number", &dev->serial);
+
+#undef GET_MANDATORY_PROPERTY_NUMBER
+#undef GET_OPTIONAL_PROPERTY_STRING
+
+    r = asprintf(&dev->key, "%"PRIx64, session);
+    if (r < 0)
+        return hs_error(HS_ERROR_MEMORY, NULL);
+
+    return 1;
+}
+
+static void fill_hid_properties(struct service_aggregate *agg, hs_device *dev)
+{
+    bool success = true;
+
+    success &= get_ioregistry_value_number(agg->dev_service, CFSTR("PrimaryUsagePage"),
+                                           kCFNumberSInt16Type, &dev->u.hid.usage_page);
+    success &= get_ioregistry_value_number(agg->dev_service, CFSTR("PrimaryUsage"),
+                                           kCFNumberSInt16Type, &dev->u.hid.usage);
+
+    if (!success)
+        hs_log(HS_LOG_WARNING, "Invalid HID values for '%s", dev->path);
+}
+
+static int process_darwin_device(io_service_t service, hs_device **rdev)
+{
+    struct service_aggregate agg = {0};
+    hs_device *dev = NULL;
+    int r;
+
+    agg.dev_service = service;
+    agg.iface_service = find_conforming_parent(agg.dev_service, "IOUSBInterface");
+    agg.usb_service = find_conforming_parent(agg.iface_service, "IOUSBDevice");
+    if (!agg.iface_service || !agg.usb_service) {
         r = 0;
         goto cleanup;
     }
@@ -304,42 +356,18 @@ static int process_darwin_device(io_service_t service, hs_device **rdev)
     dev->refcount = 1;
     dev->state = HS_DEVICE_STATUS_ONLINE;
 
-#define GET_PROPERTY_NUMBER(service, key, type, var) \
-        r = get_ioregistry_value_number(service, CFSTR(key), type, var); \
-        if (!r) { \
-            hs_log(HS_LOG_WARNING, "Missing property '%s', ignoring device", key); \
-            goto cleanup; \
-        }
-
-    GET_PROPERTY_NUMBER(dev_service, "sessionID", kCFNumberSInt64Type, &session);
-    GET_PROPERTY_NUMBER(dev_service, "idVendor", kCFNumberSInt64Type, &dev->vid);
-    GET_PROPERTY_NUMBER(dev_service, "idProduct", kCFNumberSInt64Type, &dev->pid);
-    GET_PROPERTY_NUMBER(iface_service, "bInterfaceNumber", kCFNumberSInt64Type, &dev->iface);
-
-#undef GET_PROPERTY_NUMBER
-
-    r = asprintf(&dev->key, "%"PRIx64, session);
-    if (r < 0) {
-        r = hs_error(HS_ERROR_MEMORY, NULL);
-        goto cleanup;
-    }
-
-#define GET_PROPERTY_STRING(service, key, var) \
-        r = get_ioregistry_value_string((service), CFSTR(key), (var)); \
-        if (r < 0) \
-            goto cleanup;
-
-    GET_PROPERTY_STRING(dev_service, "USB Vendor Name", &dev->manufacturer);
-    GET_PROPERTY_STRING(dev_service, "USB Product Name", &dev->product);
-    GET_PROPERTY_STRING(dev_service, "USB Serial Number", &dev->serial);
-
-#undef GET_PROPERTY_STRING
-
-    r = resolve_device_location(dev_service, &dev->location);
+    r = find_device_node(&agg, dev);
     if (r <= 0)
         goto cleanup;
 
-    r = find_device_node(dev, service);
+    r = fill_device_details(&agg, dev);
+    if (r <= 0)
+        goto cleanup;
+
+    if (dev->type == HS_DEVICE_TYPE_HID)
+        fill_hid_properties(&agg, dev);
+
+    r = resolve_device_location(agg.usb_service, &dev->location);
     if (r <= 0)
         goto cleanup;
 
@@ -349,10 +377,10 @@ static int process_darwin_device(io_service_t service, hs_device **rdev)
 
 cleanup:
     hs_device_unref(dev);
-    if (dev_service)
-        IOObjectRelease(dev_service);
-    if (iface_service)
-        IOObjectRelease(iface_service);
+    if (agg.usb_service)
+        IOObjectRelease(agg.usb_service);
+    if (agg.iface_service)
+        IOObjectRelease(agg.iface_service);
     return r;
 }
 
@@ -421,11 +449,25 @@ static void darwin_devices_detached(void *udata, io_iterator_t it)
     }
 }
 
+struct enumerate_enumerate_context {
+    hs_enumerate_func *f;
+    void *udata;
+};
+
+static int enumerate_enumerate_callback(hs_device *dev, void *udata)
+{
+    struct enumerate_enumerate_context *ctx = udata;
+
+    _hs_device_log(dev, "Enumerate");
+    return (*ctx->f)(dev, ctx->udata);
+}
+
 int hs_enumerate(const hs_match *matches, unsigned int count, hs_enumerate_func *f, void *udata)
 {
     assert(f);
 
     _hs_filter filter;
+    struct enumerate_enumerate_context ctx;
     io_iterator_t it = 0;
     kern_return_t kret;
     int r;
@@ -433,6 +475,9 @@ int hs_enumerate(const hs_match *matches, unsigned int count, hs_enumerate_func 
     r = _hs_filter_init(&filter, matches, count);
     if (r < 0)
         goto cleanup;
+
+    ctx.f = f;
+    ctx.udata = udata;
 
     for (unsigned int i = 0; device_classes[i].old_stack; i++) {
         if (_hs_filter_has_type(&filter, device_classes[i].type)) {
@@ -444,7 +489,7 @@ int hs_enumerate(const hs_match *matches, unsigned int count, hs_enumerate_func 
                 goto cleanup;
             }
 
-            r = process_iterator_devices(it, &filter, f, udata);
+            r = process_iterator_devices(it, &filter, enumerate_enumerate_callback, &ctx);
             if (r)
                 goto cleanup;
 
